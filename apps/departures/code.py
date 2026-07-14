@@ -59,11 +59,15 @@ while not varinit.exit:
     x = 1
     while wifi.radio.connected == True and not varinit.exit:            # MAINLOOP ###########################
         x = 1 - x
-        if x: 
+        if x:
             ampule.listen(socket)
             check_button()
+        if int(varinit.settings.get("station_rotate", 0)) and time.monotonic() > varinit.rotate_timer + int(varinit.settings.get("rotate_interval", 15)):
+            varinit.rotate_timer = time.monotonic()
+            if len(functions.configured_stations()) > 1:
+                functions.rotate_station()   # switch screen shows the meal on row 2, then departures
         if int(varinit.settings["listmode"]) and time.monotonic() > varinit.shared["scroll_timer"] + updatedelay: varinit.shared["scroll_timer"] = list_mode()
-        elif not int(varinit.settings["listmode"]) and varinit.display.width > 64: 
+        elif not int(varinit.settings["listmode"]) and varinit.display.width > 64:
             varinit.tg2.x -= 1
             refresh(int(delay + varinit.settings["scroll"]) + 1 * (delay*2))
             if varinit.tg2.x < -varinit.scrollsum: scroll_mode()

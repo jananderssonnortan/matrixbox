@@ -3,6 +3,18 @@ from functions import *
 import web
 #from code import exit
 
+def _urldecode(s):
+    s = s.replace("+", " ")
+    out = ""
+    i = 0
+    while i < len(s):
+        if s[i] == "%" and i + 2 < len(s) + 1:
+            try:
+                out += chr(int(s[i+1:i+3], 16)); i += 3; continue
+            except: pass
+        out += s[i]; i += 1
+    return out
+
 def timer():
     html = web.timer(varinit.settings["language"], varinit.settings["timer"])
     return html
@@ -387,6 +399,21 @@ def huvudsidan(request):
     elif "show_station" in request.params:
         varinit.settings["show_my_station"] = 1 - varinit.settings["show_my_station"]
         functions.switch(_screen=False)
+        return (200, {}, "")
+    elif "station_rotate" in request.params:
+        varinit.settings["station_rotate"] = 1 - int(varinit.settings.get("station_rotate", 0))
+        varinit.rotate_timer = 0
+        varinit.active_station = functions.configured_stations()[0]
+        functions.switch(_screen=False)
+        return (200, {}, "")
+    elif "rotate_interval" in request.params:
+        try: varinit.settings["rotate_interval"] = max(3, int(request.params["rotate_interval"]))
+        except: pass
+        return (200, {}, "")
+    elif "dinner_url" in request.params:
+        varinit.settings["dinner_url"] = _urldecode(str(request.params["dinner_url"]))
+        varinit.dinner_fetch_timer = 0
+        varinit.dinner_day = ""          # force a fresh fetch for the new URL
         return (200, {}, "")
     elif "buses_option" in request.params:
         varinit.settings["stations"][num]["buses_option"] = request.params["buses_option"]

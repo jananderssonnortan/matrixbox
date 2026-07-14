@@ -1,4 +1,4 @@
-from __main__ import wifi, pool
+from __main__ import wifi, pool, requests
 import varinit, createhtml, microcontroller, json, ipaddress
 from varinit import *
 import random
@@ -16,9 +16,110 @@ def cls(__screen, _refresh=False):
 def reset():
     displayio.release_displays()
     microcontroller.reset()
-def strlen(_string): 
+def strlen(_string):
     if isinstance(_string, str): _string = _string.lower()
     return sum(fonts[varinit.currentfont][c][0] for c in _string)
+
+def _rotation_slot_count():
+    # How many station slots this panel actually uses (matches the UI's screen buttons).
+    w = varinit.if_long
+    if w > 128: return 3
+    if w > 64: return 2
+    return 1
+
+def configured_stations():
+    # Ordered station slots with a real siteid, bounded to what this panel uses.
+    out = []
+    for i in range(1, _rotation_slot_count() + 1):
+        k = str(i)
+        try:
+            if str(varinit.settings["stations"][k]["siteid"]) not in ("", "0", "00", "000"):
+                out.append(k)
+        except: pass
+    return out or ["1"]
+
+def next_station():
+    # Peek the next configured slot without switching to it.
+    lst = configured_stations()
+    if len(lst) < 2: return varinit.active_station
+    cur = varinit.active_station if varinit.active_station in lst else lst[0]
+    return lst[(lst.index(cur) + 1) % len(lst)]
+
+# --- little burger icon for the meal row ('b' bun, 'g' lettuce, 'p' patty) ---
+_BURGER = [
+    " bbbbbb ",
+    "bbbbbbbb",
+    "gggggggg",
+    "pppppppp",
+    "bbbbbbbb",
+    " bbbbbb ",
+]
+
+def _blit_icon(bmp, rows, x0, y0, colormap):
+    # colormap: char -> palette index. Chars not in the map are transparent.
+    W = bmp.width; H = bmp.height
+    for dy in range(len(rows)):
+        row = rows[dy]
+        for dx in range(len(row)):
+            c = colormap.get(row[dx])
+            if c is not None:
+                x = x0 + dx; y = y0 + dy
+                if 0 <= x < W and 0 <= y < H:
+                    bmp[x, y] = c
+
+def _fill_rect(bmp, x0, y0, x1, y1, c):
+    for x in range(x0, x1):
+        for y in range(y0, y1):
+            if 0 <= x < bmp.width and 0 <= y < bmp.height:
+                bmp[x, y] = c
+
+def _dinner_hold(seconds):
+    t = time.monotonic()
+    while time.monotonic() < t + seconds:
+        try:
+            if not varinit.button.value: return
+        except: pass
+        time.sleep(0.05)
+
+def rotate_station():
+    # Switch to the next station. If a meal is available in-window, first show the
+    # FOOD SWITCH SCREEN (station name on row 1, meal on row 2) for a few seconds.
+    # Then the normal screen loads: stock render puts the next departure on the top
+    # line and scrolls the following departures on row 2.
+    nxt = next_station()
+    varinit.active_station = nxt
+    if not int(varinit.settings["listmode"]) and dinner_time_ok():
+        meal = get_dinner()
+        if meal:
+            try:
+                # row 1: station name (only on the food switch screen)
+                _name = varinit.text[4] + varinit.settings["stations"][nxt]["mystation"][:16]
+                renderstring(_name, 1, 0, large=True, _cls=top)
+                # row 2: the meal
+                varinit.tg2.x = 0
+                varinit.palette[4] = (255, 170, 30)  # bun (super bright)
+                varinit.palette[6] = (30, 30, 60)    # icon background
+                varinit.palette[7] = (60, 255, 60)   # lettuce (super bright)
+                varinit.palette[8] = (80, 210, 255)  # meal text (super bright cyan)
+                varinit.palette[9] = (255, 90, 20)   # patty (super bright)
+                renderstring(meal, 0, 0, smallfont=True, _cls=bottom, target_bmp=bottom, target_offs=5, start_x=14)
+                for _x in range(14, min(bottom.width, 128)):
+                    for _y in range(bottom.height):
+                        if bottom[_x, _y] == 1: bottom[_x, _y] = 8
+                _fill_rect(bottom, 2, 4, 12, 12, 6)
+                _blit_icon(bottom, _BURGER, 3, 5, {"b": 4, "g": 7, "p": 9})
+                refresh()
+                _dinner_hold(int(varinit.settings.get("dinner_hold", 3)))
+                cls(top)   # clear the station name so the next-departure render starts clean
+            except Exception:
+                pass
+    # normal screen: stock render draws the next departure on top + scrolls the rest.
+    # reset to the large font so top_screen_filter renders the top line on-screen
+    # (the small-font meal render leaves currentfont=1 -> off-screen buffer otherwise).
+    varinit.currentfont = 0
+    varinit.active_message = False
+    varinit.shared["scroll_timer"] = 0
+    return nxt
 
 def temperature_check():
     if round(microcontroller.cpu.temperature) > varinit.temperature_threshold: 
@@ -45,6 +146,41 @@ def ad_message():
     data = fetch_data(host="data.t-skylt.se", port=89, args="/settings?ad")
     ad = json.loads(data)
     return str(ad[1]) if ad[0] else False
+
+def dinner_time_ok():
+    # True on weekdays within the configured window (uses the same clock as check_timer).
+    try:
+        if varinit.today not in ("Mon", "Tue", "Wed", "Thu", "Fri"): return False
+        return compare_time("14:30") < compare_time(varinit._currenttime) < compare_time("19:00")
+    except: return False
+
+def get_dinner():
+    # Fetch today's meal once. Once we have a definitive answer for the current
+    # day we stop fetching; on empty/failed fetches we retry (every 60s) until we do.
+    url = varinit.settings.get("dinner_url", "")
+    if not url: return ""
+    if varinit.today and varinit.dinner_day == varinit.today:
+        return varinit.dinner_meal          # already have today's answer, don't refetch
+    if time.monotonic() > varinit.dinner_fetch_timer + 60:
+        varinit.dinner_fetch_timer = time.monotonic()
+        try:
+            resp = requests.get(url)
+            txt = resp.text
+            resp.close()
+            if len(txt) == 0:
+                pass   # empty body (redirect/fetch hiccup): keep cached, retry later
+            else:
+                meal = ""
+                for line in txt.replace("\r", "").split("\n"):
+                    line = line.strip()
+                    if line: meal = line          # keep last non-empty line (skips any header)
+                if len(meal) >= 2 and meal[0] == '"' and meal[-1] == '"':
+                    meal = meal[1:-1].replace('""', '"')
+                varinit.dinner_meal = meal.strip()
+                varinit.dinner_day = varinit.today   # got today's answer, lock it in for the day
+        except Exception:
+            pass       # failed fetch: keep cached, retry later
+    return varinit.dinner_meal
 
 def check_button():
     if varinit.last_button_state:
@@ -129,8 +265,8 @@ def switch(_screen=True, _cls=False, force=False, wifi_screen=False):
             cls(topbottom)
             if not force: list_splash(_settings=varinit.shared["startup"])
             if wifi_screen: update_screen()
-        else: 
-            renderstring(varinit.text[4]+ varinit.settings["stations"]["1"]["mystation"][:16], 1, 0,large=True, _cls=top)
+        else:
+            renderstring(varinit.text[4]+ varinit.settings["stations"][varinit.active_station]["mystation"][:16], 1, 0,large=True, _cls=top)
         bounce(direction)
     cls(bottom, _refresh=True)
     reset_scroll()
@@ -786,10 +922,10 @@ def scroll_mode():
     elif varinit.shared["loop_counter"] == -3:   
         
         
-        renderstring(varinit.text[4]+ varinit.settings["stations"]["1"]["mystation"][:16], 1, 0, large=True, _cls=top)
+        renderstring(varinit.text[4]+ varinit.settings["stations"][varinit.active_station]["mystation"][:16], 1, 0, large=True, _cls=top)
         if varinit.settings["direction"] == 1: direction = varinit.text[10]
         elif varinit.settings["direction"] == 2: direction = varinit.text[11]
-        ifoffset = " + " + str(varinit.settings["stations"]["1"]["offset"]) + varinit.settings["mins"] if int(varinit.settings["stations"]["1"]["offset"]) else ""
+        ifoffset = " + " + str(varinit.settings["stations"][varinit.active_station]["offset"]) + varinit.settings["mins"] if int(varinit.settings["stations"][varinit.active_station]["offset"]) else ""
         varinit.text[5] = direction + "   >   " + str(varinit.settings["maxdest"]) + dicts.language[varinit.settings["language"]]["display"]["departures"] + ifoffset
         varinit.scrollsum = renderstring(varinit.text[5], large=True, _cls=bottom)
         varinit.shared["loop_counter"] = -2
@@ -802,22 +938,22 @@ def scroll_mode():
         elif time.monotonic() > varinit.shared["scroll_timer"] + updatedelay:
             cls(bottom, _refresh=True)
             if time.monotonic() > varinit.ad_timer + varinit.ad_delay * 60 and varinit.shared["nightcount"] < 2:
-                try: 
-                    ad = ad_message() 
+                try:
+                    ad = ad_message()
                     if ad: 
                         varinit.scrollsum = renderstring(reformat_data([["1", ad,"***","",""]]), large=True, _cls=bottom)
                         varinit.active_message = True
-                    else: varinit.scrollsum = renderstring(reformat_data(get_departure()), large=True)
-                except: varinit.scrollsum = renderstring(reformat_data(get_departure()), large=True)
+                    else: varinit.scrollsum = renderstring(reformat_data(get_departure(num=varinit.active_station)), large=True)
+                except: varinit.scrollsum = renderstring(reformat_data(get_departure(num=varinit.active_station)), large=True)
             
             elif time.monotonic() > varinit.deviations_timer + (varinit.deviations_delay * 60) \
                 and int(varinit.settings["show_msgs"]) and varinit.shared["nightcount"] < 2 \
-                and varinit.settings["stations"]["1"]["operator"] == "sl":
+                and varinit.settings["stations"][varinit.active_station]["operator"] == "sl":
                 try: varinit.scrollsum = renderstring(reformat_data([["1", get_deviations(),"***","",""]]), large=True, _cls=bottom)
                 except: varinit.scrollsum = renderstring(reformat_data([["1", " ","***","",""]]), large=True, _cls=bottom)
                 varinit.deviations_timer = time.monotonic()
                 varinit.active_message = True
-            else: varinit.scrollsum = renderstring(reformat_data(get_departure()), large=True)
+            else: varinit.scrollsum = renderstring(reformat_data(get_departure(num=varinit.active_station)), large=True)
             rnd = random.randint(0, 10)
             varinit.shared["scroll_timer"] = time.monotonic() + rnd
             print("RND: ", rnd)
@@ -881,7 +1017,7 @@ def list_mode(mini=False, half=False):
         except: pass
         return time.monotonic() - varinit.updatedelay + 2
     
-    # trainlist = reformat_data(get_departure())
+    # trainlist = reformat_data(get_departure(num=varinit.active_station))
     ### DEBUG
     
     _r = 1
@@ -893,8 +1029,9 @@ def list_mode(mini=False, half=False):
     except: pass
     
     for i in range(_r):
-        print("Fetching: ", i+1)
-        varinit.traindata[i+1] = reformat_data(get_departure(num = str(i+1)))
+        _fnum = str(i+1) if int(varinit.settings.get("multiple", 0)) else varinit.active_station
+        print("Fetching: ", _fnum)
+        varinit.traindata[i+1] = reformat_data(get_departure(num = _fnum))
         if not half or i+1 == _r: break
         
     

@@ -101,6 +101,8 @@ PAGE_TPL = """<!DOCTYPE html>
 {SLEEP_CHK}
 {BUTTON_MODE_CHK}
 {SHOW_STATION_CHK}
+{STATION_ROTATE_SECTION}
+{DINNER_SECTION}
 </div>
 <div style="margin-bottom:.6rem">
 <button type="button" class="save-btn" data-u="/?save=true">&#128190; {T_SAVE}</button></div>
@@ -274,7 +276,7 @@ def html():
     screen_btns = ""
     screen_btn_disp = ""
     if if_long > 64:
-        if not int(s["multiple"]):
+        if not (int(s["multiple"]) or int(s.get("station_rotate", 0))):
             screen_btn_disp = "display:none;"
         ns = 2 if if_long == 128 else 3
         _p = []
@@ -417,6 +419,23 @@ def html():
     # show station
     show_stn_html = _chk("show_my_station", s["show_my_station"], "/?show_station=1", T["show_station"])
 
+    # rotate stations (cycle configured station slots on a timer)
+    station_rotate_html = ""
+    if if_long > 64:
+        station_rotate_html = (
+            _chk("station_rotate", s.get("station_rotate", 0), "/?station_rotate=switch", T.get("rotate_stations", "Rotate stations"))
+            + '<label class="sw" style="margin-left:.6rem">' + T.get("rotate_interval", "Interval (s)")
+            + ' <input type="text" id="rotate_interval" class="form-control" style="width:60px;display:inline" placeholder="'
+            + str(s.get("rotate_interval", 15)) + '" data-p="rotate_interval" data-e="blur"></label>'
+        )
+
+    # dinner (menu CSV woven into the departures scroll during a weekday time window)
+    dinner_html = ('<div class="grp" style="margin-top:.4rem"><div class="grp-title">&#127869; '
+        + T.get("dinner", "Dinner menu (CSV URL)") + '</div>'
+        + '<input type="text" id="dinner_url" class="form-control" placeholder="'
+        + (str(s.get("dinner_url", "")) or "https://.../pub?...&output=csv")
+        + '" data-p="dinner_url" data-e="blur" data-enc="1"></div>')
+
     # white button (128 only)
     white_btn = ""
     if if_long == 128:
@@ -501,6 +520,8 @@ def html():
         "MULTIPLE_SECTION": mult_html,
         "DEVIATIONS_SECTION": devs_html,
         "SLEEP_CHK": sleep_html, "BUTTON_MODE_CHK": button_mode_html, "SHOW_STATION_CHK": show_stn_html,
+        "STATION_ROTATE_SECTION": station_rotate_html,
+        "DINNER_SECTION": dinner_html,
         "T_SAVE": T["save"], "T_USER": T["user"],
         "USER_PH": str(s["user"]),
         "T_ADVANCED": T["advanced"],
