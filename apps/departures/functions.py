@@ -73,49 +73,298 @@ def _fill_rect(bmp, x0, y0, x1, y1, c):
             if 0 <= x < bmp.width and 0 <= y < bmp.height:
                 bmp[x, y] = c
 
-def _dinner_hold(seconds):
-    t = time.monotonic()
+def _draw_degree(bmp, x, y, c):
+    # small hollow ring used as the ° symbol (the font has no degree glyph)
+    for ox, oy in ((0, 0), (1, 0), (2, 0), (0, 1), (2, 1), (0, 2), (1, 2), (2, 2)):
+        px, py = x + ox, y + oy
+        if 0 <= px < bmp.width and 0 <= py < bmp.height: bmp[px, py] = c
+
+def _draw_paren(bmp, x, y, c, left=True):
+    # 2x6 pixel bracket (the font has '(' but no ')', so draw both for consistency)
+    pts = ((1, 0), (0, 1), (0, 2), (0, 3), (0, 4), (1, 5)) if left else \
+          ((0, 0), (1, 1), (1, 2), (1, 3), (1, 4), (0, 5))
+    for ox, oy in pts:
+        px, py = x + ox, y + oy
+        if 0 <= px < bmp.width and 0 <= py < bmp.height: bmp[px, py] = c
+
+# --- weather sprites (row-2 icons). chars: o sun-disc, r ray, c cloud, b rain, w snow, y bolt ---
+_WX_SUN = ["..r..r..r..", "...r.r.r...", ".r..ooo..r.", "....ooo....", "...ooooo...",
+           "rr.ooooo.rr", "...ooooo...", "....ooo....", ".r..ooo..r.", "...r.r.r...", "..r..r..r.."]
+_WX_CLOUD = ["...........", "...cccc....", "..cccccc...", ".cccccccc..", "cccccccccc.",
+             ".cccccccc..", "...........", "...........", "...........", "...........", "..........."]
+_WX_PARTLY = ["..r........", ".r.r.......", "..ooo......", ".ooooocccc.", "..ooocccccc",
+              "..cccccccc.", ".cccccccc..", "...........", "...........", "...........", "..........."]
+_WX_RAIN = ["...........", "...cccc....", "..cccccc...", ".cccccccc..", "cccccccccc.",
+            ".cccccccc..", "...........", "..b..b..b..", ".b..b..b...", "b..b..b....", "..........."]
+_WX_SNOW = ["...........", "...cccc....", "..cccccc...", ".cccccccc..", "cccccccccc.",
+            ".cccccccc..", "...........", "..w..w..w..", ".w..w..w...", "..w..w..w..", "..........."]
+_WX_THUNDER = ["...........", "...cccc....", "..cccccc...", ".cccccccc..", "cccccccccc.",
+               ".cccccccc..", "....yy.....", "...yy......", "..yyyyy....", "....yy.....", "...yy......"]
+_WX_COLORMAP = {"o": 4, "r": 9, "c": 6, "b": 8, "w": 2, "y": 1}
+
+def _wx_sprite(code):
+    if code == 0: return _WX_SUN
+    if code in (1, 2): return _WX_PARTLY
+    if code in (3, 45, 48): return _WX_CLOUD
+    if (71 <= code <= 77) or code in (85, 86): return _WX_SNOW
+    if 95 <= code <= 99: return _WX_THUNDER
+    if (51 <= code <= 67) or (80 <= code <= 82): return _WX_RAIN
+    return _WX_CLOUD
+
+def _wx_severity(c):
+    if 95 <= c <= 99: return 5
+    if (71 <= c <= 77) or c in (85, 86): return 4
+    if (51 <= c <= 67) or (80 <= c <= 82): return 3
+    if c in (3, 45, 48): return 2
+    if c in (1, 2): return 1
+    return 0
+
+def _wx_warning(code, temp, gust, hi=None, lo=None):
+    # Short extreme-weather label (or "") from the upcoming code, wind gust (m/s) and temps.
+    # hi/lo are the day's upcoming high/low so HETT/KYLA fire on the forecast peak, not just now.
+    if hi is None: hi = temp
+    if lo is None: lo = temp
+    if code in (95, 96, 99): return "ÅSKA"              # thunderstorm
+    if gust is not None and gust >= 21: return "STORM"  # gale/storm gusts
+    if code in (75, 86): return "SNÖFALL"               # heavy snow
+    if code in (65, 67, 82): return "SKYFALL"           # heavy rain / cloudburst
+    if gust is not None and gust >= 14: return "BLÅST"  # strong wind
+    if hi >= 28: return "VARMT AF"                      # peak of the day, even if cooler now
+    if lo <= -10: return "KYLA"
+    return ""
+
+def get_weather():
+    # Upcoming weather for the next 0-2h + current temp + extreme warning, via open-meteo (no key).
+    # Returns (weather_code, temp_str, warning) or (None, None, ""). Cached ~20 min; keep-last-good.
+    if not int(varinit.settings.get("weather", 1)): return (None, None, "")
+    # low priority: attempt at most once every 30 min (whether it succeeds or fails), so a
+    # flaky network can never make it refetch on every switch and tax the chip.
+    if varinit.wx_timer and time.monotonic() - varinit.wx_timer < 1800:
+        return (varinit.wx_code, varinit.wx_temp, varinit.wx_warn)
+    varinit.wx_timer = time.monotonic()   # mark the attempt up front
+    lat = varinit.settings.get("weather_lat", "59.36")   # Vallingby
+    lon = varinit.settings.get("weather_lon", "17.87")
+    try:
+        url = ("https://api.open-meteo.com/v1/forecast?latitude=" + str(lat) +
+               "&longitude=" + str(lon) +
+               "&current=temperature_2m,weather_code,wind_gusts_10m"
+               "&hourly=weather_code,temperature_2m&daily=temperature_2m_max"
+               "&forecast_days=1&wind_speed_unit=ms&timezone=auto")   # m/s (default is km/h!); today only
+        resp = requests.get(url, timeout=5); d = json.loads(resp.text); resp.close()   # give up on a stall
+        cur = d["current"]
+        temp = int(round(cur["temperature_2m"]))
+        try: gust = float(cur.get("wind_gusts_10m"))
+        except: gust = None
+        # Index the hourly arrays by the API's OWN local timestamps, not the device clock.
+        # (hourly/current times are in the location's timezone; the device's _currenttime is
+        # UTC from the HTTP date header, so using it mis-slices by the tz offset -> false HETT.)
+        htimes = d["hourly"].get("time", [])
+        chour = str(cur.get("time", ""))[:13]        # "YYYY-MM-DDTHH"
+        h = 0
+        for _i, _t in enumerate(htimes):
+            if str(_t)[:13] == chour: h = _i; break
+        else:
+            try: h = int(str(varinit._currenttime).split(":")[0])   # fallback: device hour
+            except: h = 0
+        hcodes = [int(c) for c in d["hourly"]["weather_code"]]
+        near = [int(cur["weather_code"])] + hcodes[h + 1:h + 3]   # now + next ~2h -> upcoming condition
+        varinit.wx_code = max(near, key=_wx_severity)
+        varinit.wx_temp = str(temp)   # number only; the degree mark is drawn as pixels (font lacks it)
+        # today's forecast high, shown only while it's still ahead (hidden once it has passed)
+        hi = lo = temp
+        try:
+            dh = int(round(float(d["daily"]["temperature_2m_max"][0])))
+            htemps = [float(t) for t in d["hourly"]["temperature_2m"]]
+            remaining = htemps[h:] if h < len(htemps) else []
+            ahead = bool(remaining) and max(remaining) >= dh - 0.5
+            varinit.wx_peak = dh if (ahead and dh > temp) else None
+            if remaining:                       # upcoming high/low drive HETT/KYLA
+                hi = max(temp, int(round(max(remaining))))
+                lo = min(temp, int(round(min(remaining))))
+        except: varinit.wx_peak = None
+        varinit.wx_warn = _wx_warning(varinit.wx_code, temp, gust, hi=hi, lo=lo)
+    except Exception:
+        pass
+    return (varinit.wx_code, varinit.wx_temp, varinit.wx_warn)
+
+def _switch_hold(seconds, flash=False):
+    # Hold the switch screen; if flash, blink palette slot 5 (the warning colour) for attention.
+    t = last = time.monotonic(); on = True
     while time.monotonic() < t + seconds:
         try:
             if not varinit.button.value: return
         except: pass
+        if flash and time.monotonic() - last > 0.4:
+            on = not on
+            try: varinit.palette[10] = (255, 40, 20) if on else (55, 8, 4)
+            except: pass
+            refresh(); last = time.monotonic()
         time.sleep(0.05)
 
+def _recolor_row2(from_idx=1, to_idx=8, x0=14):
+    for _x in range(x0, min(bottom.width, 128)):
+        for _y in range(bottom.height):
+            if bottom[_x, _y] == from_idx: bottom[_x, _y] = to_idx
+
+def _bri(rgb):
+    # Scale a full-brightness colour by the user's brightness setting so the switch/custom
+    # screens track the same knob as the departures text (colors(): value = base*(brightness+1);
+    # /5 treats the given rgb as the value at max brightness ~4).
+    f = int(varinit.settings.get("brightness", 0)) + 1
+    return (min(255, rgb[0] * f // 5), min(255, rgb[1] * f // 5), min(255, rgb[2] * f // 5))
+
+def _render_meal(meal):
+    # row 2: burger icon + today's meal (bright cyan)
+    varinit.tg2.x = 0
+    varinit.palette[4] = _bri((255, 170, 30))   # bun
+    varinit.palette[6] = _bri((40, 40, 70))     # icon background
+    varinit.palette[7] = _bri((60, 255, 60))    # lettuce
+    varinit.palette[8] = _bri((80, 210, 255))   # meal text
+    varinit.palette[9] = _bri((255, 90, 20))    # patty
+    renderstring(meal, 0, 0, smallfont=True, _cls=bottom, target_bmp=bottom, target_offs=5, start_x=14)
+    _recolor_row2(1, 8, 14)
+    _fill_rect(bottom, 2, 4, 12, 12, 6)
+    _blit_icon(bottom, _BURGER, 3, 5, {"b": 4, "g": 7, "p": 9})
+
+def _render_no_dinner():
+    # row 2: burger icon + "Kylskapsroulette!" in amber, so an unplanned day reads clearly
+    # different from a real meal (which is cyan).
+    varinit.tg2.x = 0
+    varinit.palette[4] = _bri((255, 170, 30))    # bun + text: amber (vs cyan for a real meal)
+    varinit.palette[6] = _bri((40, 40, 70))      # icon background
+    varinit.palette[7] = _bri((60, 255, 60))     # lettuce
+    varinit.palette[9] = _bri((255, 90, 20))     # patty
+    renderstring("Kylsk\xe5psroulette!", 0, 0, smallfont=True, _cls=bottom,
+                 target_bmp=bottom, target_offs=5, start_x=14)
+    _recolor_row2(1, 4, 14)
+    _fill_rect(bottom, 2, 4, 12, 12, 6)
+    _blit_icon(bottom, _BURGER, 3, 5, {"b": 4, "g": 7, "p": 9})
+
+def _render_weather():
+    # row 2: upcoming-weather icon + temp, plus an extreme-weather warning to the right.
+    # Returns (drawn, has_warning).
+    code, temp, warn = get_weather()
+    if code is None: return False, False
+    varinit.tg2.x = 0
+    varinit.palette[2] = _bri((235, 235, 245))  # snow / white
+    varinit.palette[4] = _bri((255, 210, 0))    # sun disc
+    varinit.palette[6] = _bri((150, 150, 165))  # cloud grey
+    varinit.palette[8] = _bri((120, 200, 255))  # rain / temp text
+    varinit.palette[9] = _bri((255, 140, 0))    # sun rays / bolt-ish
+    _blit_icon(bottom, _wx_sprite(code), 1, 2, _WX_COLORMAP)
+    # current temp: "12" + degree ring + "C"  ->  "12°C"
+    w1 = int(renderstring(temp, 0, 0, smallfont=True, _cls=None, target_bmp=bottom, target_offs=5, start_x=15))
+    w2 = int(renderstring("C", 0, 0, smallfont=True, _cls=None, target_bmp=bottom, target_offs=5, start_x=w1 + 5))
+    right = w2
+    # today's high in (parens) - only while still ahead
+    peak = varinit.wx_peak
+    lpx = rpx = None
+    if peak is not None:
+        lpx = w2 + 4
+        w3 = int(renderstring(str(peak), 0, 0, smallfont=True, _cls=None, target_bmp=bottom, target_offs=5, start_x=lpx + 3))
+        rpx = w3 + 1
+        right = rpx + 3
+    _recolor_row2(1, 8, 15)                     # colour the digits + 'C' blue
+    _draw_degree(bottom, w1 + 1, 4, 8)          # ° after the current number
+    if peak is not None:
+        _draw_paren(bottom, lpx, 5, 8, True)    # (
+        _draw_paren(bottom, rpx, 5, 8, False)   # )
+    if warn:
+        varinit.palette[10] = (255, 40, 20)   # dedicated warning slot (blinks via _switch_hold)
+        wx = right + 7
+        renderstring(warn, 0, 0, smallfont=True, _cls=None, target_bmp=bottom, target_offs=5, start_x=wx)
+        _recolor_row2(1, 10, wx)
+    return True, bool(warn)
+
+# custom-message banner colours (palette slots 2/3; 1 = departures text, restored after)
+_CUSTOM_GREEN = (15, 150, 25)     # banner background (true green, no blue tint)
+_CUSTOM_WHITE = (240, 240, 240)   # message text
+
+def _show_welcome(msg):
+    # Full-screen: scroll the custom message across once, slowly (so long text reads),
+    # as white text on a green banner.
+    try:
+        saved = [varinit.palette[i] for i in range(2, 8)]   # preserve shared palette slots
+        cls(top); cls(bottom)
+        width = int(renderstring(msg, large=True, _cls=bottom))   # renders glyphs (index 1) into bottom
+        GREEN, WHITE = 2, 3
+        varinit.palette[GREEN] = _bri(_CUSTOM_GREEN)
+        varinit.palette[WHITE] = _bri(_CUSTOM_WHITE)
+        span = min(bottom.width, width + 2)
+        for x in range(span):                       # glyph pixels -> white, everything else -> green banner
+            for y in range(bottom.height):
+                bottom[x, y] = WHITE if bottom[x, y] else GREEN
+        varinit.tg2.y = 8                           # centre the single line on the 32px panel
+        varinit.tg2.x = varinit.if_long
+        while varinit.tg2.x > -width:
+            try:
+                if not varinit.button.value: break  # let the button bail out
+            except: pass
+            varinit.tg2.x -= 1
+            refresh()
+            time.sleep(0.012)                       # ~4-5s total for a long message
+        varinit.tg2.y = 16
+        cls(top); cls(bottom)
+        for i, v in enumerate(saved):
+            varinit.palette[i + 2] = v              # restore slots so other screens are unaffected
+    except Exception:
+        pass
+
+# stylized "SL" badge (white 'w' on SL-red 'r') shown where the metro "M" used to be
+_SL = [
+    "rrrrrrrrrrrr",
+    "rrrrrrrrrrrr",
+    "rrrrrrrrrrrr",
+    "rrwwwrrwrrrr",
+    "rrwrrrrwrrrr",
+    "rrwwwrrwrrrr",
+    "rrrrwrrwrrrr",
+    "rrrrwrrwrrrr",
+    "rrwwwrrwwwrr",
+    "rrrrrrrrrrrr",
+    "rrrrrrrrrrrr",
+    "rrrrrrrrrrrr",
+]
+
 def rotate_station():
-    # Switch to the next station. If a meal is available in-window, first show the
-    # FOOD SWITCH SCREEN (station name on row 1, meal on row 2) for a few seconds.
-    # Then the normal screen loads: stock render puts the next departure on the top
-    # line and scrolls the following departures on row 2.
+    # Switch to the next station and show the upcoming-station switch screen:
+    # row 1 = SL badge + the station about to show; row 2 = the meal during the dinner
+    # window, otherwise upcoming weather + temp. Then the normal departures screen loads.
     nxt = next_station()
     varinit.active_station = nxt
-    if not int(varinit.settings["listmode"]) and dinner_time_ok():
-        meal = get_dinner()
-        if meal:
-            try:
-                # row 1: station name (only on the food switch screen)
-                _name = varinit.text[4] + varinit.settings["stations"][nxt]["mystation"][:16]
-                renderstring(_name, 1, 0, large=True, _cls=top)
-                # row 2: the meal
-                varinit.tg2.x = 0
-                varinit.palette[4] = (255, 170, 30)  # bun (super bright)
-                varinit.palette[6] = (30, 30, 60)    # icon background
-                varinit.palette[7] = (60, 255, 60)   # lettuce (super bright)
-                varinit.palette[8] = (80, 210, 255)  # meal text (super bright cyan)
-                varinit.palette[9] = (255, 90, 20)   # patty (super bright)
-                renderstring(meal, 0, 0, smallfont=True, _cls=bottom, target_bmp=bottom, target_offs=5, start_x=14)
-                for _x in range(14, min(bottom.width, 128)):
-                    for _y in range(bottom.height):
-                        if bottom[_x, _y] == 1: bottom[_x, _y] = 8
-                _fill_rect(bottom, 2, 4, 12, 12, 6)
-                _blit_icon(bottom, _BURGER, 3, 5, {"b": 4, "g": 7, "p": 9})
-                refresh()
-                _dinner_hold(int(varinit.settings.get("dinner_hold", 3)))
-                cls(top)   # clear the station name so the next-departure render starts clean
-            except Exception:
-                pass
+    if not int(varinit.settings["listmode"]):
+        try:
+            _name = varinit.settings["stations"][nxt]["mystation"][:16]
+            renderstring(_name, 1, 0, large=True, _cls=top, start_x=15)   # name after the SL badge
+            varinit.palette[2] = _bri((235, 235, 245))    # station-name letters
+            varinit.palette[11] = _bri((200, 30, 30))     # SL red badge
+            _blit_icon(top, _SL, 0, 2, {"r": 11, "w": 2})   # 12x12 square badge, vertically centred
+            cls(bottom)
+            get_sheet()                      # refresh meal + custom message (cached ~15 min)
+            shown = False; warn = False
+            # only show a meal we fetched TODAY (never a stale one from a previous day)
+            if dinner_time_ok() and varinit.dinner_day == varinit.today:
+                if varinit.dinner_meal:
+                    _render_meal(varinit.dinner_meal); shown = True
+                elif varinit.settings.get("dinner_url", ""):
+                    # definitive answer for today and it's empty -> nothing planned
+                    _render_no_dinner(); shown = True
+            if not shown:
+                _, warn = _render_weather()
+            refresh()
+            _switch_hold(int(varinit.settings.get("dinner_hold", 3)), flash=warn)
+            cls(top)
+            # occasional full-screen rainbow greeting, driven solely by the sheet row-2
+            # message (blank = off)
+            _wmsg = varinit.sheet_msg
+            if _wmsg and _wmsg.strip():
+                varinit.welcome_count += 1
+                _every = max(1, int(varinit.settings.get("welcome_every", 3)))
+                if varinit.welcome_count % _every == 0:
+                    _show_welcome(_wmsg.strip())
+        except Exception:
+            pass
     # normal screen: stock render draws the next departure on top + scrolls the rest.
-    # reset to the large font so top_screen_filter renders the top line on-screen
-    # (the small-font meal render leaves currentfont=1 -> off-screen buffer otherwise).
     varinit.currentfont = 0
     varinit.active_message = False
     varinit.shared["scroll_timer"] = 0
@@ -148,38 +397,47 @@ def ad_message():
     return str(ad[1]) if ad[0] else False
 
 def dinner_time_ok():
-    # True on weekdays within the configured window (uses the same clock as check_timer).
+    # True every day inside the dinner window (settings dinner_start/dinner_end, default
+    # 13:00-19:00). Uses the same clock as check_timer().
     try:
-        if varinit.today not in ("Mon", "Tue", "Wed", "Thu", "Fri"): return False
-        return compare_time("14:30") < compare_time(varinit._currenttime) < compare_time("19:00")
+        _s = str(varinit.settings.get("dinner_start", "") or "13:00")
+        _e = str(varinit.settings.get("dinner_end", "") or "19:00")
+        return compare_time(_s) < compare_time(varinit._currenttime) < compare_time(_e)
     except: return False
 
-def get_dinner():
-    # Fetch today's meal once. Once we have a definitive answer for the current
-    # day we stop fetching; on empty/failed fetches we retry (every 60s) until we do.
+def get_sheet():
+    # One published CSV, two rows (single column, NO header):
+    #   row 1 = today's meal  ->  varinit.dinner_meal
+    #   row 2 = an optional custom message  ->  varinit.sheet_msg
+    # Row 2 lets a sheet formula switch on a greeting for a window (e.g. "Heja VSK!" in
+    # the hours before kickoff) and blank it otherwise. Rows are read POSITIONALLY, so an
+    # empty meal with a present message still works. Polled every ~15 min.
+    # A SUCCESSFUL fetch always replaces the cache, even when the cells are empty: an empty
+    # meal cell means "nothing planned today", NOT "keep yesterday's". Only a failed fetch
+    # (exception) keeps the previous values, and dinner_day stamps the day they belong to.
     url = varinit.settings.get("dinner_url", "")
-    if not url: return ""
-    if varinit.today and varinit.dinner_day == varinit.today:
-        return varinit.dinner_meal          # already have today's answer, don't refetch
-    if time.monotonic() > varinit.dinner_fetch_timer + 60:
-        varinit.dinner_fetch_timer = time.monotonic()
-        try:
-            resp = requests.get(url)
-            txt = resp.text
-            resp.close()
-            if len(txt) == 0:
-                pass   # empty body (redirect/fetch hiccup): keep cached, retry later
-            else:
-                meal = ""
-                for line in txt.replace("\r", "").split("\n"):
-                    line = line.strip()
-                    if line: meal = line          # keep last non-empty line (skips any header)
-                if len(meal) >= 2 and meal[0] == '"' and meal[-1] == '"':
-                    meal = meal[1:-1].replace('""', '"')
-                varinit.dinner_meal = meal.strip()
-                varinit.dinner_day = varinit.today   # got today's answer, lock it in for the day
-        except Exception:
-            pass       # failed fetch: keep cached, retry later
+    if not url: return
+    if varinit.dinner_fetch_timer and time.monotonic() - varinit.dinner_fetch_timer < 900:
+        return
+    varinit.dinner_fetch_timer = time.monotonic()   # mark the attempt up front
+    try:
+        resp = requests.get(url, timeout=5)   # give up on a stall rather than hang the loop
+        txt = resp.text
+        resp.close()
+        lines = (txt or "").replace("\r", "").split("\n")
+        def _cell(i):
+            if i >= len(lines): return ""
+            v = lines[i].strip()
+            if len(v) >= 2 and v[0] == '"' and v[-1] == '"': v = v[1:-1].replace('""', '"')
+            return v.strip()
+        varinit.dinner_meal = _cell(0)
+        varinit.sheet_msg = _cell(1)
+        varinit.dinner_day = varinit.today   # the day these values are valid for
+    except Exception:
+        pass       # failed fetch: keep cached, retry on the next poll
+
+def get_dinner():
+    get_sheet()
     return varinit.dinner_meal
 
 def check_button():
@@ -524,7 +782,7 @@ def fetch_data(host, port=80, args="", headers = "", filetype="text"):
         with pool.socket() as s:
             cache = bytearray(1024)                                # MAX FILESIZE
             #s.setblocking(False)
-            s.settimeout(varinit.socket_timeout)
+            s.settimeout(min(varinit.socket_timeout, 8))   # cap the stall window (watchdog safety)
             s.connect((host, port))
             sent = s.sendall(request)
             #buff = bytearray(512)

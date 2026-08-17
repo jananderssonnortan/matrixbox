@@ -103,6 +103,7 @@ PAGE_TPL = """<!DOCTYPE html>
 {SHOW_STATION_CHK}
 {STATION_ROTATE_SECTION}
 {DINNER_SECTION}
+{WELCOME_SECTION}
 </div>
 <div style="margin-bottom:.6rem">
 <button type="button" class="save-btn" data-u="/?save=true">&#128190; {T_SAVE}</button></div>
@@ -429,12 +430,33 @@ def html():
             + str(s.get("rotate_interval", 15)) + '" data-p="rotate_interval" data-e="blur"></label>'
         )
 
+    # HTML-attribute escape so a saved value can be pre-filled without breaking the markup
+    def _attr(v): return str(v).replace("&", "&amp;").replace('"', "&quot;").replace("<", "&lt;")
+
     # dinner (menu CSV woven into the departures scroll during a weekday time window)
+    # value= is pre-filled with the saved URL so a stray focus/blur re-sends it instead of wiping it
     dinner_html = ('<div class="grp" style="margin-top:.4rem"><div class="grp-title">&#127869; '
         + T.get("dinner", "Dinner menu (CSV URL)") + '</div>'
-        + '<input type="text" id="dinner_url" class="form-control" placeholder="'
-        + (str(s.get("dinner_url", "")) or "https://.../pub?...&output=csv")
-        + '" data-p="dinner_url" data-e="blur" data-enc="1"></div>')
+        + '<input type="text" id="dinner_url" class="form-control" value="'
+        + _attr(s.get("dinner_url", "")) + '" placeholder="https://.../pub?...&amp;output=csv"'
+        + ' data-p="dinner_url" data-e="blur" data-enc="1">'
+        # window the meal (and the "nothing planned" fallback) is shown in; saves on change
+        + '<div style="margin-top:.35rem;font-size:.8rem">' + T.get("dinner_window", "Shown between")
+        + ' <input type="time" id="dinner_start" value="' + _attr(s.get("dinner_start", "") or "13:00") + '">'
+        + ' - <input type="time" id="dinner_end" value="' + _attr(s.get("dinner_end", "") or "19:00") + '"></div>'
+        + '<script>'
+        + 'var dws=document.getElementById("dinner_start"),dwe=document.getElementById("dinner_end");'
+        + 'function dwSend(){if(dws.value&&dwe.value)fetch("/?dinner_start="+encodeURIComponent(dws.value)'
+        + '+"&dinner_end="+encodeURIComponent(dwe.value),{method:"GET"})}'
+        + 'dws.addEventListener("change",dwSend);dwe.addEventListener("change",dwSend);'
+        + '</script></div>')
+
+    # custom-message cadence (the text itself comes from the sheet's row 2; blank there = off)
+    welcome_html = ('<div class="grp" style="margin-top:.4rem"><div class="grp-title">&#127881; '
+        + T.get("welcome", "Custom message (from sheet row 2)") + '</div>'
+        + '<label class="sw">' + T.get("welcome_every", "Show every Nth switch")
+        + ' <input type="text" id="welcome_every" class="form-control" style="width:60px;display:inline" value="'
+        + str(s.get("welcome_every", 3)) + '" data-p="welcome_every" data-e="blur"></label></div>')
 
     # white button (128 only)
     white_btn = ""
@@ -522,6 +544,7 @@ def html():
         "SLEEP_CHK": sleep_html, "BUTTON_MODE_CHK": button_mode_html, "SHOW_STATION_CHK": show_stn_html,
         "STATION_ROTATE_SECTION": station_rotate_html,
         "DINNER_SECTION": dinner_html,
+        "WELCOME_SECTION": welcome_html,
         "T_SAVE": T["save"], "T_USER": T["user"],
         "USER_PH": str(s["user"]),
         "T_ADVANCED": T["advanced"],
@@ -586,7 +609,7 @@ def timer(_language, timer):
 <div><input type="time" id="mondayS" value=""" + timer["Monday"][0] + """> - <input type="time" id="mondayE" value=""" + timer["Monday"][1] + """></div>
 <script>
 var ms=document.getElementById("mondayS"),me=document.getElementById("mondayE");
-function mSend(){if(ms.value&&me.value)fetch('/?set_timer=Monday&start='+encodeURIComponent(ms.value+'to='+me.value),{method:'GET'})}
+function mSend(){if(ms.value&&me.value)fetch('/?set_timer=Monday&start='+encodeURIComponent(ms.value)+'&end='+encodeURIComponent(me.value),{method:'GET'})}
 ms.addEventListener("change",mSend);me.addEventListener("change",mSend);
 </script>
 
@@ -594,7 +617,7 @@ ms.addEventListener("change",mSend);me.addEventListener("change",mSend);
 <div><input type="time" id="tuesdayS" value=""" + timer["Tuesday"][0] + """> - <input type="time" id="tuesdayE" value=""" + timer["Tuesday"][1] + """></div>
 <script>
 var tus=document.getElementById("tuesdayS"),tue=document.getElementById("tuesdayE");
-function tuSend(){if(tus.value&&tue.value)fetch('/?set_timer=Tuesday&start='+encodeURIComponent(tus.value+'to='+tue.value),{method:'GET'})}
+function tuSend(){if(tus.value&&tue.value)fetch('/?set_timer=Tuesday&start='+encodeURIComponent(tus.value)+'&end='+encodeURIComponent(tue.value),{method:'GET'})}
 tus.addEventListener("change",tuSend);tue.addEventListener("change",tuSend);
 </script>
 
@@ -602,7 +625,7 @@ tus.addEventListener("change",tuSend);tue.addEventListener("change",tuSend);
 <div><input type="time" id="wednesdayS" value=""" + timer["Wednesday"][0] + """> - <input type="time" id="wednesdayE" value=""" + timer["Wednesday"][1] + """></div>
 <script>
 var ws=document.getElementById("wednesdayS"),we=document.getElementById("wednesdayE");
-function wSend(){if(ws.value&&we.value)fetch('/?set_timer=Wednesday&start='+encodeURIComponent(ws.value+'to='+we.value),{method:'GET'})}
+function wSend(){if(ws.value&&we.value)fetch('/?set_timer=Wednesday&start='+encodeURIComponent(ws.value)+'&end='+encodeURIComponent(we.value),{method:'GET'})}
 ws.addEventListener("change",wSend);we.addEventListener("change",wSend);
 </script>
 
@@ -610,7 +633,7 @@ ws.addEventListener("change",wSend);we.addEventListener("change",wSend);
 <div><input type="time" id="thursdayS" value=""" + timer["Thursday"][0] + """> - <input type="time" id="thursdayE" value=""" + timer["Thursday"][1] + """></div>
 <script>
 var ths=document.getElementById("thursdayS"),the_=document.getElementById("thursdayE");
-function thSend(){if(ths.value&&the_.value)fetch('/?set_timer=Thursday&start='+encodeURIComponent(ths.value+'to='+the_.value),{method:'GET'})}
+function thSend(){if(ths.value&&the_.value)fetch('/?set_timer=Thursday&start='+encodeURIComponent(ths.value)+'&end='+encodeURIComponent(the_.value),{method:'GET'})}
 ths.addEventListener("change",thSend);the_.addEventListener("change",thSend);
 </script>
 
@@ -618,7 +641,7 @@ ths.addEventListener("change",thSend);the_.addEventListener("change",thSend);
 <div><input type="time" id="fridayS" value=""" + timer["Friday"][0] + """> - <input type="time" id="fridayE" value=""" + timer["Friday"][1] + """></div>
 <script>
 var fs=document.getElementById("fridayS"),fe=document.getElementById("fridayE");
-function fSend(){if(fs.value&&fe.value)fetch('/?set_timer=Friday&start='+encodeURIComponent(fs.value+'to='+fe.value),{method:'GET'})}
+function fSend(){if(fs.value&&fe.value)fetch('/?set_timer=Friday&start='+encodeURIComponent(fs.value)+'&end='+encodeURIComponent(fe.value),{method:'GET'})}
 fs.addEventListener("change",fSend);fe.addEventListener("change",fSend);
 </script>
 
@@ -626,7 +649,7 @@ fs.addEventListener("change",fSend);fe.addEventListener("change",fSend);
 <div><input type="time" id="saturdayS" value=""" + timer["Saturday"][0] + """> - <input type="time" id="saturdayE" value=""" + timer["Saturday"][1] + """></div>
 <script>
 var sas=document.getElementById("saturdayS"),sae=document.getElementById("saturdayE");
-function saSend(){if(sas.value&&sae.value)fetch('/?set_timer=Saturday&start='+encodeURIComponent(sas.value+'to='+sae.value),{method:'GET'})}
+function saSend(){if(sas.value&&sae.value)fetch('/?set_timer=Saturday&start='+encodeURIComponent(sas.value)+'&end='+encodeURIComponent(sae.value),{method:'GET'})}
 sas.addEventListener("change",saSend);sae.addEventListener("change",saSend);
 </script>
 
@@ -634,7 +657,7 @@ sas.addEventListener("change",saSend);sae.addEventListener("change",saSend);
 <div><input type="time" id="sundayS" value=""" + timer["Sunday"][0] + """> - <input type="time" id="sundayE" value=""" + timer["Sunday"][1] + """></div>
 <script>
 var sus=document.getElementById("sundayS"),sue=document.getElementById("sundayE");
-function suSend(){if(sus.value&&sue.value)fetch('/?set_timer=Sunday&start='+encodeURIComponent(sus.value+'to='+sue.value),{method:'GET'})}
+function suSend(){if(sus.value&&sue.value)fetch('/?set_timer=Sunday&start='+encodeURIComponent(sus.value)+'&end='+encodeURIComponent(sue.value),{method:'GET'})}
 sus.addEventListener("change",suSend);sue.addEventListener("change",suSend);
 </script>
 

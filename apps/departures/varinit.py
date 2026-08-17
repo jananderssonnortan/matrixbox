@@ -18,9 +18,16 @@ traindata = {}
 no_of_screens_flag = 2
 active_station = "1"
 rotate_timer = time.monotonic()
+welcome_count = 0          # counts station switches, to show the greeting every Nth
 dinner_meal = ""
 dinner_day = ""            # weekday we last got a definitive menu answer for
 dinner_fetch_timer = 0
+sheet_msg = ""             # optional custom message from CSV row 2 (e.g. "Heja VSK!")
+wx_code = None             # cached upcoming-weather code (open-meteo WMO)
+wx_temp = ""               # cached current-temperature string (number only), e.g. "18"
+wx_peak = None             # cached upcoming peak temp (int) if higher than current, else None
+wx_warn = ""               # cached extreme-weather label, e.g. "STORM" or ""
+wx_timer = 0
 timer = ""
 temperature_timer = False
 temperature_threshold = 89
@@ -126,10 +133,10 @@ display.root_group = group
 display.refresh()
 try: display.root_group.hidden = True
 except: pass
-top = displayio.Bitmap(max(280, if_long), 16, 10)
-bottom = displayio.Bitmap(1280, 16, 10)
+top = displayio.Bitmap(max(280, if_long), 16, 12)   # 12 colours: leaves a slot for the bus icon
+bottom = displayio.Bitmap(1280, 16, 12)   # 12 colours: leaves index 10+ free for the weather warning
 topbottom = displayio.Bitmap(max(200, if_long, if_tall), max(if_long, if_tall), 10)
-palette = displayio.Palette(10, dither=False)
+palette = displayio.Palette(12, dither=False)
 
 
 shared = {"loop_counter":-5,          

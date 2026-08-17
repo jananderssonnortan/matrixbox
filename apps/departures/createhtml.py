@@ -4,16 +4,22 @@ import web
 #from code import exit
 
 def _urldecode(s):
+    # Collect raw bytes (percent-escapes are UTF-8 byte pairs, e.g. "ä" -> %C3%A4),
+    # then decode the whole sequence as UTF-8 so Swedish åäö survive intact.
     s = s.replace("+", " ")
-    out = ""
+    b = bytearray()
     i = 0
-    while i < len(s):
-        if s[i] == "%" and i + 2 < len(s) + 1:
+    n = len(s)
+    while i < n:
+        if s[i] == "%" and i + 3 <= n:
             try:
-                out += chr(int(s[i+1:i+3], 16)); i += 3; continue
+                b.append(int(s[i+1:i+3], 16)); i += 3; continue
             except: pass
-        out += s[i]; i += 1
-    return out
+        b.extend(s[i].encode("utf-8")); i += 1
+    try:
+        return bytes(b).decode("utf-8")
+    except:
+        return "".join(chr(x) for x in b)
 
 def timer():
     html = web.timer(varinit.settings["language"], varinit.settings["timer"])
@@ -273,13 +279,14 @@ def huvudsidan(request):
     html_decode = dicts.html_decode
 
     if "set_timer" in request.params:
-        #print(request.params["set_timer"])
-        _split = request.params["start"].split("to%3D")
-        start = _split[0].replace("%3A", ":")
-        end = _split[1].replace("%3A", ":")
-        #if functions.check_correct_time(start, end): varinit.settings["timer"][request.params["set_timer"]] = [start, end]
-        varinit.settings["timer"][request.params["set_timer"]] = [start, end]
-        
+        # start/end arrive as separate, URL-encoded params (e.g. start=07%3A00 -> "07:00")
+        day = request.params["set_timer"]
+        start = _urldecode(str(request.params.get("start", "")))
+        end = _urldecode(str(request.params.get("end", "")))
+        if day in varinit.settings["timer"] and start and end:
+            varinit.settings["timer"][day] = [start, end]
+            try: functions.savesettings()      # persist immediately so it survives a reboot
+            except: pass
         return (200, {}, "")
     
     elif "cleartimer" in request.params: 
@@ -414,6 +421,19 @@ def huvudsidan(request):
         varinit.settings["dinner_url"] = _urldecode(str(request.params["dinner_url"]))
         varinit.dinner_fetch_timer = 0
         varinit.dinner_day = ""          # force a fresh fetch for the new URL
+        return (200, {}, "")
+    elif "dinner_start" in request.params:
+        _st = _urldecode(str(request.params.get("dinner_start", "")))
+        _en = _urldecode(str(request.params.get("dinner_end", "")))
+        if _st and _en:
+            varinit.settings["dinner_start"] = _st
+            varinit.settings["dinner_end"] = _en
+            try: functions.savesettings()      # persist right away, no reboot needed
+            except: pass
+        return (200, {}, "")
+    elif "welcome_every" in request.params:
+        try: varinit.settings["welcome_every"] = max(1, int(request.params["welcome_every"]))
+        except: pass
         return (200, {}, "")
     elif "buses_option" in request.params:
         varinit.settings["stations"][num]["buses_option"] = request.params["buses_option"]
