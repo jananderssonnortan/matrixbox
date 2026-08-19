@@ -133,13 +133,15 @@ def _wx_warning(code, temp, gust, hi=None, lo=None):
     if lo <= -10: return "KYLA"
     return ""
 
-def get_weather():
+def get_weather(allow_fetch=True):
     # Upcoming weather for the next 0-2h + current temp + extreme warning, via open-meteo (no key).
     # Returns (weather_code, temp_str, warning) or (None, None, ""). Cached ~20 min; keep-last-good.
     if not int(varinit.settings.get("weather", 1)): return (None, None, "")
     # low priority: attempt at most once every 30 min (whether it succeeds or fails), so a
     # flaky network can never make it refetch on every switch and tax the chip.
     if varinit.wx_timer and time.monotonic() - varinit.wx_timer < 1800:
+        return (varinit.wx_code, varinit.wx_temp, varinit.wx_warn)
+    if not allow_fetch:   # another fetch already ran on this switch; try again on the next one
         return (varinit.wx_code, varinit.wx_temp, varinit.wx_warn)
     varinit.wx_timer = time.monotonic()   # mark the attempt up front
     lat = varinit.settings.get("weather_lat", "59.36")   # Vallingby
@@ -240,10 +242,10 @@ def _render_no_dinner():
     _fill_rect(bottom, 2, 4, 12, 12, 6)
     _blit_icon(bottom, _BURGER, 3, 5, {"b": 4, "g": 7, "p": 9})
 
-def _render_weather():
+def _render_weather(allow_fetch=True):
     # row 2: upcoming-weather icon + temp, plus an extreme-weather warning to the right.
     # Returns (drawn, has_warning).
-    code, temp, warn = get_weather()
+    code, temp, warn = get_weather(allow_fetch=allow_fetch)
     if code is None: return False, False
     varinit.tg2.x = 0
     varinit.palette[2] = _bri((235, 235, 245))  # snow / white
@@ -340,7 +342,10 @@ def rotate_station():
             varinit.palette[11] = _bri((200, 30, 30))     # SL red badge
             _blit_icon(top, _SL, 0, 2, {"r": 11, "w": 2})   # 12x12 square badge, vertically centred
             cls(bottom)
-            get_sheet()                      # refresh meal + custom message (cached ~15 min)
+            # Keep two blocking fetches off one switch: every switch already pays for a
+            # departures fetch, so if the sheet fetched here, weather waits for the next switch
+            # (it keeps its cached value and its poll timer, so it's only ~15s later).
+            _fetched = get_sheet()           # refresh meal + custom message (cached ~15 min)
             shown = False; warn = False
             # only show a meal we fetched TODAY (never a stale one from a previous day)
             if dinner_time_ok() and varinit.dinner_day == varinit.today:
@@ -350,9 +355,15 @@ def rotate_station():
                     # definitive answer for today and it's empty -> nothing planned
                     _render_no_dinner(); shown = True
             if not shown:
-                _, warn = _render_weather()
+                _, warn = _render_weather(allow_fetch=not _fetched)
             refresh()
-            _switch_hold(int(varinit.settings.get("dinner_hold", 3)), flash=warn)
+            # Spend the hold on the incoming station's fetch instead of sleeping through
+            # it, then hold out whatever time is left. Same time on screen, but the
+            # departures are already in memory when the panel clears.
+            _hold = int(varinit.settings.get("dinner_hold", 3))
+            _t0 = time.monotonic()
+            prefetch_departures(nxt)
+            _switch_hold(max(0, _hold - (time.monotonic() - _t0)), flash=warn)
             cls(top)
             # occasional full-screen rainbow greeting, driven solely by the sheet row-2
             # message (blank = off)
@@ -405,7 +416,9 @@ def dinner_time_ok():
         return compare_time(_s) < compare_time(varinit._currenttime) < compare_time(_e)
     except: return False
 
-def get_sheet():
+def get_sheet(allow_fetch=True):
+    # Returns True if it actually performed a network fetch (the caller uses that to keep two
+    # blocking fetches off the same switch screen).
     # One published CSV, two rows (single column, NO header):
     #   row 1 = today's meal  ->  varinit.dinner_meal
     #   row 2 = an optional custom message  ->  varinit.sheet_msg
@@ -416,9 +429,10 @@ def get_sheet():
     # meal cell means "nothing planned today", NOT "keep yesterday's". Only a failed fetch
     # (exception) keeps the previous values, and dinner_day stamps the day they belong to.
     url = varinit.settings.get("dinner_url", "")
-    if not url: return
+    if not url: return False
     if varinit.dinner_fetch_timer and time.monotonic() - varinit.dinner_fetch_timer < 900:
-        return
+        return False
+    if not allow_fetch: return False   # a fetch already ran this switch; retry on the next one
     varinit.dinner_fetch_timer = time.monotonic()   # mark the attempt up front
     try:
         resp = requests.get(url, timeout=5)   # give up on a stall rather than hang the loop
@@ -435,6 +449,7 @@ def get_sheet():
         varinit.dinner_day = varinit.today   # the day these values are valid for
     except Exception:
         pass       # failed fetch: keep cached, retry on the next poll
+    return True    # a fetch was attempted (success or failure), so it cost us the time
 
 def get_dinner():
     get_sheet()
@@ -903,6 +918,35 @@ def traffic_parser(data, traffic_type, num="1"):
                            (int(stn["blue"]) and line_id in (10, 11)):
                             dataout.append(dep)
     return dataout
+
+def prefetch_departures(num):
+    # Pull the incoming station's departures JSON early and park it in the same cache
+    # get_departure() already reads from. Called from the switch screen so the network
+    # round trip hides under the hold instead of running after the panel is cleared.
+    try:
+        stn = varinit.settings["stations"][num]
+    except: return False
+    # Nothing useful to fetch for an unconfigured slot; get_departure() shows its own
+    # prompt for these and we must not set the cache flag on its behalf.
+    try:
+        if str(stn["siteid"]) in ("", "0", "00", "000") or not stn["operator"]: return False
+    except: return False
+    try:
+        temperature_check()
+        _data = fetch_data(host="data.t-skylt.se", port=90,
+                           args='/get_departures?country=' + stn["country"] +
+                                '&operator=' + stn["operator"] +
+                                "&station=" + str(stn["siteid"]))
+        if not _data: return False
+        varinit.cached_departure_data[num] = json.loads(_data)
+        varinit.use_cached_data = True
+        print("■ Prefetched station", num)
+        return True
+    except Exception as e:
+        # Never let a prefetch miss break the switch: get_departure() just fetches
+        # normally afterwards, exactly like before.
+        print("Prefetch failed:", type(e).__name__, e)
+        return False
 
 def get_departure(num = "1", dataout = [["1", "^ Data error","","",""]]):
     
