@@ -321,48 +321,82 @@ def _parse_el(txt):
         i = k
     return out
 
+def _el_next_day(day):
+    # "YYYY-MM-DD" -> the following date (noon anchor keeps DST shifts away from midnight)
+    t = time.localtime(time.mktime((int(day[0:4]), int(day[5:7]), int(day[8:10]), 12, 0, 0, 0, 0, -1)) + 86400)
+    return "%04d-%02d-%02d" % (t[0], t[1], t[2])
+
 def get_price(allow_fetch=True):
-    # Fetch today's prices once per local day; retry a failure after 10 min. Returns True if it
-    # attempted a fetch, so the caller can keep to one background fetch per switch.
+    # Today's prices once per local day, and from 13:00 (when the next day is published)
+    # tomorrow's, so the bars can run past midnight; at midnight tomorrow simply becomes today.
+    # A failure (or tomorrow not out yet) retries after 10 min. Returns True if it attempted a
+    # fetch, so the caller can keep to one background fetch per switch.
     if not int(varinit.settings.get("el_price", 1)): return False
     now = local_now()
     if not now: return False
-    day = now[0]
-    if getattr(varinit, "el_day", "") == day: return False
+    day, mins = now
+    days = getattr(varinit, "el_days", {})
+    want = day if day not in days else None
+    if not want and mins >= 13 * 60:
+        nxt = _el_next_day(day)
+        if nxt not in days: want = nxt
+    if not want: return False
     t = getattr(varinit, "el_timer", 0)
     if t and time.monotonic() - t < 600: return False
     if not allow_fetch: return False
     varinit.el_timer = time.monotonic()
     zone = str(varinit.settings.get("el_zone", "SE3"))
-    url = "https://www.elprisetjustnu.se/api/v1/prices/" + day[:4] + "/" + day[5:] + "_" + zone + ".json"
+    url = "https://www.elprisetjustnu.se/api/v1/prices/" + want[:4] + "/" + want[5:] + "_" + zone + ".json"
     try:
         resp = requests.get(url, timeout=5); txt = resp.text; resp.close()
         pts = _parse_el(txt)
         if len(pts) >= 20:
             ps = sorted(p for _, p in pts); n = len(ps)
-            varinit.el_points = pts
-            varinit.el_lo = ps[n // 3]                # cheapest third of the day -> green
-            varinit.el_hi = ps[(n * 3) // 4]          # priciest quarter -> red
-            varinit.el_day = day
+            keep = {k: v for k, v in days.items() if k >= day}   # drop past days
+            # (points, green limit = cheapest third of that day, red limit = priciest quarter)
+            keep[want] = (pts, ps[n // 3], ps[(n * 3) // 4])
+            varinit.el_days = keep
             varinit.el_timer = 0                      # back-off is only for failures
     except Exception as e:
         print("el:", e)
     return True
 
-def el_now():
-    # Current price, or None if we don't have today's data.
-    now = local_now()
-    if not now or getattr(varinit, "el_day", "") != now[0]: return None
+def _el_at(pts, minute):
     cur = None
-    for m, p in varinit.el_points:
-        if m <= now[1]: cur = p
+    for m, p in pts:
+        if m <= minute: cur = p
         else: break
     return cur
 
-def _el_level(p):
-    if p >= varinit.el_hi and p >= 1.0: return _EL_RED   # floor: a cheap day never goes red
-    if p <= varinit.el_lo: return _EL_GREEN
+def el_now():
+    # Current price, or None if we don't have today's data.
+    now = local_now()
+    if not now: return None
+    e = getattr(varinit, "el_days", {}).get(now[0])
+    return _el_at(e[0], now[1]) if e else None
+
+def _el_level(p, lo, hi):
+    if p >= hi and p >= 1.0: return _EL_RED   # floor: a cheap day never goes red
+    if p <= lo: return _EL_GREEN
     return _EL_AMBER
+
+def _el_hours(n):
+    # [(price, colour) or None] x n: the current quarter-hour, then the means of the next n-1
+    # whole hours, each coloured against its own day's limits. None where prices are unknown.
+    day, mins = local_now()
+    days = varinit.el_days
+    e = days[day]; p = _el_at(e[0], mins)
+    out = [(p, _el_level(p, e[1], e[2]))]
+    tomorrow = _el_next_day(day)
+    for k in range(1, n):
+        h = mins // 60 + k
+        e = days.get(day if h < 24 else tomorrow)
+        h %= 24
+        q = [v for m, v in e[0] if h * 60 <= m < h * 60 + 60] if e else []
+        if not q: out.append(None); continue
+        v = sum(q) / len(q)
+        out.append((v, _el_level(v, e[1], e[2])))
+    return out
 
 def _small_width(txt):
     # (width, baseline_y) of txt in the small font, measured off-screen in `bottom`.
@@ -376,31 +410,44 @@ def _small_width(txt):
                 bottom[x, y] = 0
     return w, base
 
+_EL_BARS = 8                                # hours shown as bars (current quarter + 7)
+_EL_BAR_W = 3                               # bar width; 1 px gap between bars
+
 def _render_price():
-    # "El 2,62 kr" right-aligned on row 2, in one traffic-light colour. Returns True if drawn.
+    # Right end of row 2: bars for the next hours (height = price, colour = level, white mark
+    # under "now") followed by the current price, e.g. "2,65". Falls back to "El 2,65 kr" and
+    # then to nothing when there is no room. Returns True if something was drawn.
     try:
         p = el_now()
         if p is None: return False
         W = varinit.if_long
-        c = _el_level(p)
-        ip, dp = ("%.2f" % p).split(".")
-        parts = ["El ", ip, None, dp, " kr"]          # None = hand-drawn comma (font's is blank)
-        ws = []; base = 0
-        for s in parts:
-            if s is None: ws.append(3); continue
-            w, b = _small_width(s); ws.append(w)
-            if s == ip: base = b
-        total = sum(ws)
         used = -1                                     # rightmost pixel already on row 2
         for x in range(W - 1, -1, -1):
             for y in range(bottom.height):
                 if bottom[x, y]: used = x; break
             if used >= 0: break
-        x = W - 2 - total
-        if x - used < 5: return False                 # no room: weather warning / long meal wins
+        ip, dp = ("%.2f" % p).split(".")
+        hrs = _el_hours(_EL_BARS)
+        c = hrs[0][1]
+        bars_w = _EL_BARS * (_EL_BAR_W + 1) - 1
+        if int(varinit.settings.get("el_bars", 1)):
+            layouts = ([ip, None, dp], bars_w + 4), (["El ", ip, None, dp, " kr"], 0)
+        else:
+            layouts = ((["El ", ip, None, dp, " kr"], 0),)
+        for parts, lead in layouts:                  # None = hand-drawn comma (font's is blank)
+            ws = []; base = 0
+            for s in parts:
+                if s is None: ws.append(3); continue
+                w, b = _small_width(s); ws.append(w)
+                if s == ip: base = b
+            x = W - 2 - sum(ws) - lead
+            if x - used >= 5: break
+        else:
+            return False                              # no room: weather warning / long meal wins
         varinit.palette[_EL_GREEN] = _bri((40, 220, 60))
         varinit.palette[_EL_AMBER] = _bri((255, 170, 0))
-        x0 = x
+        if lead: _el_draw_bars(x, hrs)
+        x += lead; x0 = x
         for s, w in zip(parts, ws):
             if s is None:
                 bottom[x + 1, base] = 1; bottom[x + 1, base + 1] = 1; bottom[x, base + 2] = 1
@@ -414,6 +461,21 @@ def _render_price():
     except Exception as e:
         print("el render:", e)
         return False
+
+def _el_draw_bars(x, hrs):
+    # heights 3..12 px scaled between the lowest and highest price shown; baseline row 13,
+    # the "now" mark (white, slot 2 on the switch screen) on row 15
+    vals = [h[0] for h in hrs if h]
+    lo, hi = min(vals), max(vals)
+    for i, h in enumerate(hrs):
+        if not h: continue
+        hgt = 3 + int(round((h[0] - lo) / ((hi - lo) or 1) * 9))
+        bx = x + i * (_EL_BAR_W + 1)
+        for dx in range(_EL_BAR_W):
+            for y in range(14 - hgt, 14):
+                bottom[bx + dx, y] = h[1]
+    for dx in range(_EL_BAR_W):
+        bottom[x + dx, 15] = 2
 
 # custom-message banner colours (palette slots 2/3; 1 = departures text, restored after)
 _CUSTOM_GREEN = (15, 150, 25)     # banner background (true green, no blue tint)
