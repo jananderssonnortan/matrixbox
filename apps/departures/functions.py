@@ -665,7 +665,9 @@ def rotate_station():
             _t0 = time.monotonic()
             prefetch_departures(nxt)
             _switch_hold(max(0, _hold - (time.monotonic() - _t0)), flash=warn)
-            cls(top)
+            # clear row 2 as well before handing slots 3/5 back: the main loop redraws once
+            # before the departures replace it, and the price would flash in the wrong colours
+            cls(top); cls(bottom)
             varinit.palette[_EL_GREEN], varinit.palette[_EL_AMBER] = _p35   # system-message colours back
             # occasional custom message (white on green, scrolls once), driven solely by
             # the sheet row-2 message (blank = off)
