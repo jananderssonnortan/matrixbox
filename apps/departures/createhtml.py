@@ -422,6 +422,13 @@ def huvudsidan(request):
         varinit.dinner_fetch_timer = 0
         varinit.dinner_day = ""          # force a fresh fetch for the new URL
         return (200, {}, "")
+    elif "dinner_hold" in request.params:
+        try:
+            varinit.settings["dinner_hold"] = min(15, max(0, int(request.params["dinner_hold"])))
+            try: functions.savesettings()
+            except: pass
+        except: pass
+        return (200, {}, "")
     elif "dinner_start" in request.params:
         _st = _urldecode(str(request.params.get("dinner_start", "")))
         _en = _urldecode(str(request.params.get("dinner_end", "")))

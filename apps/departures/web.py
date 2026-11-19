@@ -443,7 +443,11 @@ def html():
         # window the meal (and the "nothing planned" fallback) is shown in; saves on change
         + '<div style="margin-top:.35rem;font-size:.8rem">' + T.get("dinner_window", "Shown between")
         + ' <input type="time" id="dinner_start" value="' + _attr(s.get("dinner_start", "") or "13:00") + '">'
-        + ' - <input type="time" id="dinner_end" value="' + _attr(s.get("dinner_end", "") or "19:00") + '"></div>'
+        + ' - <input type="time" id="dinner_end" value="' + _attr(s.get("dinner_end", "") or "19:00") + '">'
+        # how long the switch screen is held (shorter = snappier station switching)
+        + ' &nbsp;' + T.get("dinner_hold", "Hold (s)")
+        + ' <input type="text" id="dinner_hold" class="form-control" style="width:52px;display:inline" value="'
+        + str(s.get("dinner_hold", 3)) + '" data-p="dinner_hold" data-e="blur"></div>'
         + '<script>'
         + 'var dws=document.getElementById("dinner_start"),dwe=document.getElementById("dinner_end");'
         + 'function dwSend(){if(dws.value&&dwe.value)fetch("/?dinner_start="+encodeURIComponent(dws.value)'

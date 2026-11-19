@@ -99,6 +99,10 @@ def boot():
         import functions, varinit
     functions.refresh = lambda *a, **k: None
     functions.disp_init(); functions.colors()
+    # keep the real implementations around: tests stub these, and a later test may need the
+    # genuine one back (e.g. the fetch-budget test, which must exercise real network calls).
+    functions._orig = {n: getattr(functions, n) for n in
+                       ("get_weather", "get_sheet", "get_dinner", "_show_welcome", "_switch_hold")}
     return functions, varinit
 
 # ------------------------------------------------------------------ compositor
@@ -267,7 +271,7 @@ def test_weather_switch_screen(fn, vi):
     _setup_stations(vi)
     vi.today = "Tue"; vi._currenttime = "20:00"          # OUTSIDE dinner window -> weather path
     vi.settings["dinner_url"] = ""; vi.sheet_msg = ""    # url gate -> get_sheet no-op, no message
-    fn.get_weather = lambda: (61, "12", "")              # rain, no warning
+    fn.get_weather = lambda *a, **k:(61, "12", "")              # rain, no warning
     grab = {}
     fn._switch_hold = lambda sec, flash=False: grab.setdefault("img", compose(vi))
     vi.active_station = "1"
@@ -283,7 +287,7 @@ def test_weather_warning_screen(fn, vi):
     _setup_stations(vi)
     vi.today = "Tue"; vi._currenttime = "20:00"
     vi.settings["dinner_url"] = ""; vi.sheet_msg = ""
-    fn.get_weather = lambda: (82, "18", "SKYFALL")       # heavy rain warning
+    fn.get_weather = lambda *a, **k:(82, "18", "SKYFALL")       # heavy rain warning
     grab = {}
     fn._switch_hold = lambda sec, flash=False: grab.setdefault("img", compose(vi))
     vi.active_station = "1"
@@ -299,7 +303,7 @@ def test_welcome(fn, vi):
     import time as _t
     _setup_stations(vi)
     vi.today = "Tue"; vi._currenttime = "20:00"
-    fn.get_weather = lambda: (61, "12", "")          # weather path; keeps rotate_station happy
+    fn.get_weather = lambda *a, **k:(61, "12", "")          # weather path; keeps rotate_station happy
     vi.settings["dinner_url"] = ""; vi.sheet_msg = ""   # url gate -> get_sheet no-op; use welcome_msg
     fn._switch_hold = lambda sec, flash=False: None
     _sleep = fn.time.sleep; fn.time.sleep = lambda *a: None   # don't actually wait out the scroll
@@ -337,7 +341,7 @@ def test_welcome(fn, vi):
 
 def test_no_dinner_fallback(fn, vi):
     _setup_stations(vi)
-    fn.get_weather = lambda: (61, "12", "")
+    fn.get_weather = lambda *a, **k:(61, "12", "")
     AMBER, CYAN = (255, 170, 30), (80, 210, 255)
     def run(day, t, url, csv=None, fail=False, known_day=None):
         # drives the real fetch path: csv is what the published sheet returns
@@ -372,6 +376,41 @@ def test_no_dinner_fallback(fn, vi):
     img = run("Wed", "16:30", "http://x", csv="Tacos\n")   # a real meal still wins
     check("no-dinner: a real meal still shows in cyan", img is not None and _has_color(img, CYAN, 16, 32))
     vi.dinner_meal = ""; vi.dinner_day = ""; vi.settings["dinner_url"] = ""
+
+def test_fetch_budget(fn, vi):
+    # Every switch already pays for a blocking departures fetch, so at most ONE of
+    # {sheet, weather} may fetch per switch; the loser retries on the next switch.
+    _setup_stations(vi)
+    fn.get_weather = fn._orig["get_weather"]           # undo earlier stubs: we need real fetches
+    fn.get_sheet = fn._orig["get_sheet"]
+    vi.today = "Tue"; vi._currenttime = "20:00"        # outside dinner window -> weather path
+    vi.settings["dinner_url"] = "http://x"; vi.settings["weather"] = 1
+    vi.dinner_fetch_timer = 0; vi.wx_timer = 0        # both due
+    vi.dinner_meal = ""; vi.sheet_msg = ""
+    fn._switch_hold = lambda sec, flash=False: None
+    calls = []
+    def _get(url, *a, **k):
+        calls.append("wx" if "open-meteo" in str(url) else "sheet")
+        if "open-meteo" in str(url):
+            return _wx_json(12, 3, 4.0, 15, [12] * 24, [3] * 24, 20)
+        return types.SimpleNamespace(text="Tacos\nHej", close=lambda: None)
+    fn.requests = types.SimpleNamespace(get=_get)
+
+    vi.active_station = "1"; fn.rotate_station()
+    check("budget: only one background fetch on a switch", len(calls) == 1)
+    first = calls[0] if calls else None
+
+    vi.active_station = "1"; fn.rotate_station()       # next switch: the loser gets its turn
+    check("budget: the skipped fetch happens on the next switch",
+          len(calls) == 2 and calls[1] != first)
+
+    # a skipped fetch must not lose its cached value or burn its poll timer
+    vi.dinner_meal = "Pannkakor"; vi.dinner_fetch_timer = 0
+    did = fn.get_sheet(allow_fetch=False)
+    check("budget: skipped sheet reports no fetch", did is False)
+    check("budget: skipped sheet keeps its cached meal", vi.dinner_meal == "Pannkakor")
+    check("budget: skipped sheet did not burn its poll timer", vi.dinner_fetch_timer == 0)
+    vi.settings["dinner_url"] = ""; vi.dinner_meal = ""; vi.dinner_day = ""
 
 def test_sheet_message(fn, vi):
     # One CSV, two rows: row1 meal -> dinner_meal, row2 message -> sheet_msg (positional)
@@ -414,7 +453,7 @@ def test_sheet_message(fn, vi):
     _setup_stations(vi)
     vi.settings["dinner_url"] = ""                 # url gate -> get_sheet no-op
     vi._currenttime = "16:30"                      # inside the dinner window
-    fn.get_weather = lambda: (61, "12", "")
+    fn.get_weather = lambda *a, **k:(61, "12", "")
     vi.dinner_meal = "Gamla pannkakor"; vi.dinner_day = "Tue"; vi.today = "Wed"
     grab = {}
     fn._switch_hold = lambda sec, flash=False: grab.setdefault("img", compose(vi))
@@ -427,7 +466,7 @@ def test_sheet_message(fn, vi):
     # the sheet message is the sole source of the greeting
     _setup_stations(vi)
     vi.today = "Tue"; vi._currenttime = "20:00"
-    fn.get_weather = lambda: (61, "12", "")
+    fn.get_weather = lambda *a, **k:(61, "12", "")
     fn._switch_hold = lambda sec, flash=False: None
     vi.settings["dinner_url"] = ""             # url gate -> get_sheet no-op; use staged sheet_msg
     calls = {"msg": None, "n": 0}
@@ -476,7 +515,7 @@ def render_all(fn, vi):
     # weather switch screen (outside dinner window)
     vi.today = "Tue"; vi._currenttime = "20:00"
     vi.dinner_meal = ""; vi.dinner_day = ""; vi.settings["dinner_url"] = ""; vi.sheet_msg = ""
-    fn.get_weather = lambda: (61, "12", "")
+    fn.get_weather = lambda *a, **k:(61, "12", "")
     grab = {}; fn._switch_hold = lambda sec, flash=False: grab.setdefault("img", compose(vi))
     vi.active_station = "1"; fn.rotate_station()
     if grab.get("img"): save(grab["img"], "weather.png")
@@ -502,6 +541,7 @@ def main():
     test_weather_warning_screen(fn, vi)
     test_welcome(fn, vi)
     test_no_dinner_fallback(fn, vi)
+    test_fetch_budget(fn, vi)
     test_sheet_message(fn, vi)
     if "--render" in sys.argv:
         render_all(fn, vi)

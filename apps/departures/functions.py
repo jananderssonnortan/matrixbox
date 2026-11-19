@@ -154,6 +154,12 @@ def get_weather(allow_fetch=True):
                "&forecast_days=1&wind_speed_unit=ms&timezone=auto")   # m/s (default is km/h!); today only
         resp = requests.get(url, timeout=5); d = json.loads(resp.text); resp.close()   # give up on a stall
         cur = d["current"]
+        # open-meteo's local wall clock ("YYYY-MM-DDTHH:MM", timezone=auto, DST-correct).
+        # The device clock (_currenttime) is HH:MM only, so local_now() derives the local date and time from this anchor.
+        try:
+            varinit.wx_local = str(cur.get("time", ""))
+            varinit.wx_local_mono = time.monotonic()
+        except: pass
         temp = int(round(cur["temperature_2m"]))
         try: gust = float(cur.get("wind_gusts_10m"))
         except: gust = None
@@ -278,6 +284,137 @@ def _render_weather(allow_fetch=True):
         _recolor_row2(1, 10, wx)
     return True, bool(warn)
 
+# --- electricity spot price: "El 2,62 kr" on switch-screen row 2, traffic-light coloured ---
+# Source: elprisetjustnu.se (open, no key), one fetch per local day. Shown at the right end of
+# row 2 only when it fits beside the weather/meal; hidden otherwise (warnings, long meals).
+_EL_GREEN, _EL_AMBER, _EL_RED = 3, 5, 11    # 3/5 are free on the switch screen (restored after);
+                                            # red shares 11 with the SL badge, same colour
+_EL_OFF = 400                               # scratch x in the 1280-wide bottom bitmap for measuring
+
+def local_now():
+    # (date "YYYY-MM-DD", minute-of-day) in local time, from the last weather fetch's wall clock
+    # plus elapsed monotonic time. None until weather has been fetched once (or if > 12 h stale).
+    try:
+        s = varinit.wx_local
+        el = time.monotonic() - varinit.wx_local_mono
+        if not s or el > 12 * 3600: return None
+        y, mo, d = int(s[0:4]), int(s[5:7]), int(s[8:10])
+        mins = int(s[11:13]) * 60 + int(s[14:16]) + int(el // 60)
+        t = time.localtime(time.mktime((y, mo, d, 0, 0, 0, 0, 0, -1)) + mins * 60)
+        return ("%04d-%02d-%02d" % (t[0], t[1], t[2]), t[3] * 60 + t[4])
+    except Exception:
+        return None
+
+def _parse_el(txt):
+    # [(start_minute_local, SEK_per_kWh), ...] without json.loads (19 KB / 96 dicts is heavy).
+    # Entries are ordered {"SEK_per_kWh":x, ..., "time_start":"YYYY-MM-DDTHH:MM:SS+01:00", ...}.
+    out = []; i = 0
+    while True:
+        i = txt.find('"SEK_per_kWh":', i)
+        if i < 0: break
+        i += 14; j = txt.find(",", i)
+        p = float(txt[i:j])
+        k = txt.find('"time_start":"', j)
+        if k < 0: break
+        hm = txt[k + 25:k + 30]                   # "HH:MM" after '"time_start":"YYYY-MM-DDT'
+        out.append((int(hm[:2]) * 60 + int(hm[3:5]), p))
+        i = k
+    return out
+
+def get_price(allow_fetch=True):
+    # Fetch today's prices once per local day; retry a failure after 10 min. Returns True if it
+    # attempted a fetch, so the caller can keep to one background fetch per switch.
+    if not int(varinit.settings.get("el_price", 1)): return False
+    now = local_now()
+    if not now: return False
+    day = now[0]
+    if getattr(varinit, "el_day", "") == day: return False
+    t = getattr(varinit, "el_timer", 0)
+    if t and time.monotonic() - t < 600: return False
+    if not allow_fetch: return False
+    varinit.el_timer = time.monotonic()
+    zone = str(varinit.settings.get("el_zone", "SE3"))
+    url = "https://www.elprisetjustnu.se/api/v1/prices/" + day[:4] + "/" + day[5:] + "_" + zone + ".json"
+    try:
+        resp = requests.get(url, timeout=5); txt = resp.text; resp.close()
+        pts = _parse_el(txt)
+        if len(pts) >= 20:
+            ps = sorted(p for _, p in pts); n = len(ps)
+            varinit.el_points = pts
+            varinit.el_lo = ps[n // 3]                # cheapest third of the day -> green
+            varinit.el_hi = ps[(n * 3) // 4]          # priciest quarter -> red
+            varinit.el_day = day
+            varinit.el_timer = 0                      # back-off is only for failures
+    except Exception as e:
+        print("el:", e)
+    return True
+
+def el_now():
+    # Current price, or None if we don't have today's data.
+    now = local_now()
+    if not now or getattr(varinit, "el_day", "") != now[0]: return None
+    cur = None
+    for m, p in varinit.el_points:
+        if m <= now[1]: cur = p
+        else: break
+    return cur
+
+def _el_level(p):
+    if p >= varinit.el_hi and p >= 1.0: return _EL_RED   # floor: a cheap day never goes red
+    if p <= varinit.el_lo: return _EL_GREEN
+    return _EL_AMBER
+
+def _small_width(txt):
+    # (width, baseline_y) of txt in the small font, measured off-screen in `bottom`.
+    w = int(renderstring(txt, 0, 0, smallfont=True, _cls=None, target_bmp=bottom, target_offs=5,
+                         start_x=_EL_OFF)) - _EL_OFF
+    base = 0
+    for x in range(_EL_OFF, _EL_OFF + w):
+        for y in range(bottom.height):
+            if bottom[x, y]:
+                if y > base: base = y
+                bottom[x, y] = 0
+    return w, base
+
+def _render_price():
+    # "El 2,62 kr" right-aligned on row 2, in one traffic-light colour. Returns True if drawn.
+    try:
+        p = el_now()
+        if p is None: return False
+        W = varinit.if_long
+        c = _el_level(p)
+        ip, dp = ("%.2f" % p).split(".")
+        parts = ["El ", ip, None, dp, " kr"]          # None = hand-drawn comma (font's is blank)
+        ws = []; base = 0
+        for s in parts:
+            if s is None: ws.append(3); continue
+            w, b = _small_width(s); ws.append(w)
+            if s == ip: base = b
+        total = sum(ws)
+        used = -1                                     # rightmost pixel already on row 2
+        for x in range(W - 1, -1, -1):
+            for y in range(bottom.height):
+                if bottom[x, y]: used = x; break
+            if used >= 0: break
+        x = W - 2 - total
+        if x - used < 5: return False                 # no room: weather warning / long meal wins
+        varinit.palette[_EL_GREEN] = _bri((40, 220, 60))
+        varinit.palette[_EL_AMBER] = _bri((255, 170, 0))
+        x0 = x
+        for s, w in zip(parts, ws):
+            if s is None:
+                bottom[x + 1, base] = 1; bottom[x + 1, base + 1] = 1; bottom[x, base + 2] = 1
+            else:
+                renderstring(s, 0, 0, smallfont=True, _cls=None, target_bmp=bottom, target_offs=5, start_x=x)
+            x += w
+        for xx in range(x0, x):
+            for y in range(bottom.height):
+                if bottom[xx, y] == 1: bottom[xx, y] = c
+        return True
+    except Exception as e:
+        print("el render:", e)
+        return False
+
 # custom-message banner colours (palette slots 2/3; 1 = departures text, restored after)
 _CUSTOM_GREEN = (15, 150, 25)     # banner background (true green, no blue tint)
 _CUSTOM_WHITE = (240, 240, 240)   # message text
@@ -311,6 +448,100 @@ def _show_welcome(msg):
             varinit.palette[i + 2] = v              # restore slots so other screens are unaffected
     except Exception:
         pass
+
+# --- birthday card: sheet row 2 starting with "BDAY:" (any case) ---
+# 'f' flame, 'c' candle, 'i' icing/plate, 'k' cake, 's' sprinkles. 14x16, fills the band height.
+_CAKE = [
+    "              ",
+    "   f   f   f  ",
+    "   f   f   f  ",
+    "   c   c   c  ",
+    "   c   c   c  ",
+    "   c   c   c  ",
+    " iiiiiiiiiiii ",
+    " iiiiiiiiiiii ",
+    " kiikkiikkiik ",
+    " kkkkkkkkkkkk ",
+    " kskkkskkkskk ",
+    " kkkkkkkkkkkk ",
+    " kkkskkkskkks ",
+    " kkkkkkkkkkkk ",
+    "iiiiiiiiiiiiii",
+    "              ",
+]
+_CAKE_W = 14
+_CAKE_GAP = 4
+_BDAY_BG = (0, 70, 230)         # pulsing background at its peak (royal blue)
+_BDAY_CAKE = (255, 130, 0)      # orange sponge, pops against the blue
+_BDAY_SPRINKLE = (0, 230, 255)  # cyan
+_BDAY_CANDLE = (255, 40, 40)    # red (a blue candle would vanish on the blue band)
+_BDAY_FLAMES = ((255, 200, 0), (255, 120, 0), (255, 240, 140))
+
+def birthday_text(msg):
+    # "BDAY:Grattis Anna!" -> "Grattis Anna!"; anything else -> None. Text is shown as written.
+    s = (msg or "").strip()
+    if s[:5].upper() != "BDAY:": return None
+    return s[5:].strip() or None
+
+def _show_birthday(msg):
+    # Cake + message on a slowly pulsing blue band. Static and centred when it fits the
+    # panel, otherwise cake and text scroll through once. Only palette entries change per
+    # frame (no pixel loops), so the pulse and the candle flicker cost almost nothing.
+    try:
+        saved = [varinit.palette[i] for i in range(2, 8)]
+        BG, TEXT, CAKE, SPRK, CNDL, FLAME = 2, 3, 4, 5, 6, 7
+        W = varinit.if_long
+        cls(top); cls(bottom)
+        text_x = _CAKE_W + _CAKE_GAP
+        total = int(renderstring(msg, large=True, _cls=bottom, start_x=text_x))
+        static = total <= W
+        x0 = (W - total) // 2 if static else 0
+        if x0:
+            # shift the rendered row right so the card sits centred in the bitmap
+            for x in range(total - 1, -1, -1):
+                for y in range(bottom.height):
+                    bottom[x + x0, y] = bottom[x, y]
+                    bottom[x, y] = 0
+        span = min(bottom.width, W if static else total + 2)
+        for x in range(span):                     # glyphs -> white, everything else -> band
+            for y in range(bottom.height):
+                bottom[x, y] = TEXT if bottom[x, y] else BG
+        _blit_icon(bottom, _CAKE, x0, 0, {"f": FLAME, "c": CNDL, "i": TEXT, "k": CAKE, "s": SPRK})
+        varinit.palette[TEXT] = _bri(_CUSTOM_WHITE)
+        varinit.palette[CAKE] = _bri(_BDAY_CAKE)
+        varinit.palette[SPRK] = _bri(_BDAY_SPRINKLE)
+        varinit.palette[CNDL] = _bri(_BDAY_CANDLE)
+        varinit.palette[FLAME] = _bri(_BDAY_FLAMES[0])
+        varinit.tg2.y = 8
+        varinit.tg2.x = 0 if static else W
+        t0 = last_flame = time.monotonic()
+        hold = float(varinit.settings.get("bday_hold", 6))
+        while True:
+            now = time.monotonic()
+            if static:
+                if now - t0 > hold: break
+            else:
+                if varinit.tg2.x <= -total: break
+                varinit.tg2.x -= 1
+            try:
+                if not varinit.button.value: break
+            except: pass
+            # triangle wave, 1.6 s period, 25%..100% of the peak colour
+            ph = ((now - t0) % 1.6) / 1.6
+            f = 0.25 + 0.75 * (1 - abs(2 * ph - 1))
+            varinit.palette[BG] = _bri((int(_BDAY_BG[0] * f), int(_BDAY_BG[1] * f), int(_BDAY_BG[2] * f)))
+            if now - last_flame > 0.1:
+                varinit.palette[FLAME] = _bri(random.choice(_BDAY_FLAMES))
+                last_flame = now
+            refresh()
+            time.sleep(0.03 if static else 0.012)
+        varinit.tg2.y = 16
+        varinit.tg2.x = 0
+        cls(top); cls(bottom)
+        for i, v in enumerate(saved):
+            varinit.palette[i + 2] = v
+    except Exception as e:
+        print("birthday:", e)
 
 # stylized "SL" badge (white 'w' on SL-red 'r') shown where the metro "M" used to be
 _SL = [
@@ -354,8 +585,16 @@ def rotate_station():
                 elif varinit.settings.get("dinner_url", ""):
                     # definitive answer for today and it's empty -> nothing planned
                     _render_no_dinner(); shown = True
+            _wt = getattr(varinit, "wx_timer", 0)
             if not shown:
                 _, warn = _render_weather(allow_fetch=not _fetched)
+            elif not getattr(varinit, "wx_local", ""):
+                get_weather(allow_fetch=not _fetched)   # meal showing, but the price needs the local clock
+            _fetched = _fetched or getattr(varinit, "wx_timer", 0) != _wt   # weather fetched this switch?
+            # electricity price at the right end of row 2 (daily fetch, only if nothing else fetched)
+            _p35 = (varinit.palette[_EL_GREEN], varinit.palette[_EL_AMBER])
+            get_price(allow_fetch=not _fetched)
+            _render_price()
             refresh()
             # Spend the hold on the incoming station's fetch instead of sleeping through
             # it, then hold out whatever time is left. Same time on screen, but the
@@ -365,14 +604,18 @@ def rotate_station():
             prefetch_departures(nxt)
             _switch_hold(max(0, _hold - (time.monotonic() - _t0)), flash=warn)
             cls(top)
-            # occasional full-screen rainbow greeting, driven solely by the sheet row-2
-            # message (blank = off)
+            varinit.palette[_EL_GREEN], varinit.palette[_EL_AMBER] = _p35   # system-message colours back
+            # occasional custom message (white on green, scrolls once), driven solely by
+            # the sheet row-2 message (blank = off)
             _wmsg = varinit.sheet_msg
             if _wmsg and _wmsg.strip():
                 varinit.welcome_count += 1
                 _every = max(1, int(varinit.settings.get("welcome_every", 3)))
                 if varinit.welcome_count % _every == 0:
-                    _show_welcome(_wmsg.strip())
+                    _bday = birthday_text(_wmsg)
+                    if _bday: _show_birthday(_bday)
+                    elif not (_wmsg.strip()[:5].upper() == "BDAY:"):   # bare "BDAY:" = nothing
+                        _show_welcome(_wmsg.strip())
         except Exception:
             pass
     # normal screen: stock render draws the next departure on top + scrolls the rest.
