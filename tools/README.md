@@ -23,13 +23,17 @@ MATRIXBOX_HOST=192.168.1.10 python3 tools/push.py apps/my_app/code.mpy /my_app/c
 
 `/fm/write` and `/repl` are only registered on the selector screen; a running app
 calls `ampule.routes.clear()` and installs its own, so pushing while an app runs
-returns `404`. Exit first, push, then hard reset.
+returns `404`. Exit first, push, then hard reset. The app only notices `/exit` at the
+end of its current main-loop pass, so wait until `/repl` answers before pushing.
 
 ```sh
 IP=192.168.1.113
 R=~/Documents/Arduino/matrixbox
-curl -s "http://$IP/exit" >/dev/null
-sleep 3
+curl -s -m 5 "http://$IP/exit" >/dev/null
+for i in $(seq 1 40); do
+  printf 'print(1)' | base64 | curl -s -m 3 "http://$IP/repl" --data-binary @- | grep -q '"ok"' && break
+  sleep 1
+done
 for f in functions varinit web createhtml; do
   python3 $R/tools/push.py $R/apps/departures/$f.py /departures/$f.py --host $IP
 done
