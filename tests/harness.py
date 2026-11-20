@@ -152,7 +152,7 @@ def test_dinner_time_gate(fn, vi):
     table = [("Tue", "12:59", False), ("Tue", "13:00", False), ("Tue", "13:01", True),
              ("Tue", "16:30", True),  ("Tue", "18:59", True),  ("Tue", "19:00", False),
              ("Tue", "19:30", False), ("Tue", "09:00", False),
-             ("Sat", "16:00", True),  ("Sun", "16:00", True),   # weekends included now
+             ("Sat", "16:00", True),  ("Sun", "16:00", True),   # weekends included
              ("Sat", "20:00", False)]
     ok = True
     for day, t, exp in table:

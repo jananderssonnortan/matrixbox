@@ -196,7 +196,7 @@ def get_weather(allow_fetch=True):
     return (varinit.wx_code, varinit.wx_temp, varinit.wx_warn)
 
 def _switch_hold(seconds, flash=False):
-    # Hold the switch screen; if flash, blink palette slot 5 (the warning colour) for attention.
+    # Hold the switch screen; if flash, blink palette slot 10 (the warning colour) for attention.
     t = last = time.monotonic(); on = True
     while time.monotonic() < t + seconds:
         try:
@@ -591,7 +591,7 @@ def _show_birthday(msg):
     except Exception as e:
         print("birthday:", e)
 
-# stylized "SL" badge (white 'w' on SL-red 'r') shown where the metro "M" used to be
+# stylized "SL" badge (white 'w' on SL-red 'r') in front of the station name
 _SL = [
     "rrrrrrrrrrrr",
     "rrrrrrrrrrrr",
@@ -641,9 +641,9 @@ def rotate_station():
             get_price(allow_fetch=not _fetched)
             _render_price()
             refresh()
-            # Spend the hold on the incoming station's fetch instead of sleeping through
-            # it, then hold out whatever time is left. Same time on screen, but the
-            # departures are already in memory when the panel clears.
+            # Spend the hold on the incoming station's fetch, then hold out whatever time
+            # is left: the screen stays up just as long, and the departures are already in
+            # memory when the panel clears.
             _hold = int(varinit.settings.get("dinner_hold", 3))
             _t0 = time.monotonic()
             prefetch_departures(nxt)
@@ -1211,8 +1211,8 @@ def traffic_parser(data, traffic_type, num="1"):
 
 def prefetch_departures(num):
     # Pull the incoming station's departures JSON early and park it in the same cache
-    # get_departure() already reads from. Called from the switch screen so the network
-    # round trip hides under the hold instead of running after the panel is cleared.
+    # get_departure() reads from. Called from the switch screen so the network round
+    # trip happens while the hold is on screen.
     try:
         stn = varinit.settings["stations"][num]
     except: return False
