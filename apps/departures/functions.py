@@ -234,20 +234,6 @@ def _render_meal(meal):
     _fill_rect(bottom, 2, 4, 12, 12, 6)
     _blit_icon(bottom, _BURGER, 3, 5, {"b": 4, "g": 7, "p": 9})
 
-def _render_no_dinner():
-    # row 2: burger icon + "Kylskapsroulette!" in amber, so an unplanned day reads clearly
-    # different from a real meal (which is cyan).
-    varinit.tg2.x = 0
-    varinit.palette[4] = _bri((255, 170, 30))    # bun + text: amber (vs cyan for a real meal)
-    varinit.palette[6] = _bri((40, 40, 70))      # icon background
-    varinit.palette[7] = _bri((60, 255, 60))     # lettuce
-    varinit.palette[9] = _bri((255, 90, 20))     # patty
-    renderstring("Kylsk\xe5psroulette!", 0, 0, smallfont=True, _cls=bottom,
-                 target_bmp=bottom, target_offs=5, start_x=14)
-    _recolor_row2(1, 4, 14)
-    _fill_rect(bottom, 2, 4, 12, 12, 6)
-    _blit_icon(bottom, _BURGER, 3, 5, {"b": 4, "g": 7, "p": 9})
-
 def _render_weather(allow_fetch=True):
     # row 2: upcoming-weather icon + temp, plus an extreme-weather warning to the right.
     # Returns (drawn, has_warning).
@@ -640,13 +626,10 @@ def rotate_station():
             # (it keeps its cached value and its poll timer, so it's only ~15s later).
             _fetched = get_sheet()           # refresh meal + custom message (cached ~15 min)
             shown = False; warn = False
-            # only show a meal we fetched TODAY (never a stale one from a previous day)
-            if dinner_time_ok() and varinit.dinner_day == varinit.today:
-                if varinit.dinner_meal:
-                    _render_meal(varinit.dinner_meal); shown = True
-                elif varinit.settings.get("dinner_url", ""):
-                    # definitive answer for today and it's empty -> nothing planned
-                    _render_no_dinner(); shown = True
+            # only show a meal we fetched TODAY (never a stale one from a previous day);
+            # no meal planned -> weather + price, same as outside the dinner window
+            if dinner_time_ok() and varinit.dinner_day == varinit.today and varinit.dinner_meal:
+                _render_meal(varinit.dinner_meal); shown = True
             _wt = getattr(varinit, "wx_timer", 0)
             if not shown:
                 _, warn = _render_weather(allow_fetch=not _fetched)

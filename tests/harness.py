@@ -339,10 +339,10 @@ def test_welcome(fn, vi):
     fn._show_welcome = _show; fn.time.sleep = _sleep
     vi.sheet_msg = ""
 
-def test_no_dinner_fallback(fn, vi):
+def test_empty_meal_shows_weather(fn, vi):
     _setup_stations(vi)
     fn.get_weather = lambda *a, **k:(61, "12", "")
-    AMBER, CYAN = (255, 170, 30), (80, 210, 255)
+    WX, CYAN = (120, 200, 255), (80, 210, 255)        # weather temp text, meal text
     def run(day, t, url, csv=None, fail=False, known_day=None):
         # drives the real fetch path: csv is what the published sheet returns
         vi.today = day; vi._currenttime = t
@@ -360,21 +360,19 @@ def test_no_dinner_fallback(fn, vi):
         vi.active_station = "1"; fn.rotate_station()
         return grab.get("img")
 
-    img = run("Wed", "16:30", "")                       # feature not configured -> no nag
-    check("no-dinner: nothing shown when no sheet URL is set", img is not None and not _has_color(img, AMBER, 16, 32))
+    img = run("Wed", "16:30", "")                       # feature not configured
+    check("empty meal: weather when no sheet URL is set", img is not None and _has_color(img, WX, 16, 32))
 
-    img = run("Wed", "16:30", "http://x", csv="")       # sheet fetched, cells empty -> fallback
-    check("no-dinner: amber fallback shown when today has no meal", img is not None and _has_color(img, AMBER, 16, 32))
-    check("no-dinner: fallback is not the meal cyan", img is not None and not _has_color(img, CYAN, 16, 32))
+    img = run("Wed", "16:30", "http://x", csv="")       # sheet fetched, cells empty
+    check("empty meal: weather when today has no meal", img is not None and _has_color(img, WX, 16, 32))
+    check("empty meal: no meal cyan", img is not None and not _has_color(img, CYAN, 16, 32))
 
     img = run("Wed", "16:30", "http://x", fail=True, known_day="Tue")   # today's answer unknown
-    check("no-dinner: no fallback while today's answer is unknown", img is not None and not _has_color(img, AMBER, 16, 32))
-
-    img = run("Wed", "20:00", "http://x", csv="")       # outside the dinner window
-    check("no-dinner: no fallback outside the dinner window", img is not None and not _has_color(img, AMBER, 16, 32))
+    check("empty meal: weather while today's answer is unknown", img is not None and _has_color(img, WX, 16, 32))
 
     img = run("Wed", "16:30", "http://x", csv="Tacos\n")   # a real meal still wins
-    check("no-dinner: a real meal still shows in cyan", img is not None and _has_color(img, CYAN, 16, 32))
+    check("empty meal: a real meal still shows in cyan", img is not None and _has_color(img, CYAN, 16, 32)
+          and not _has_color(img, WX, 16, 32))
     vi.dinner_meal = ""; vi.dinner_day = ""; vi.settings["dinner_url"] = ""
 
 def test_fetch_budget(fn, vi):
@@ -504,14 +502,6 @@ def render_all(fn, vi):
     grab = {}; fn._switch_hold = lambda sec, flash=False: grab.setdefault("img", compose(vi))
     vi.active_station = "1"; fn.rotate_station()
     if grab.get("img"): save(grab["img"], "dinner.png")
-    # "nothing planned" fallback (inside the window, sheet fetched but empty)
-    vi.today = "Tue"; vi._currenttime = "16:30"
-    vi.dinner_meal = ""; vi.dinner_day = "Tue"; vi.settings["dinner_url"] = "http://x"; vi.sheet_msg = ""
-    fn.requests = types.SimpleNamespace(get=lambda *a, **k: types.SimpleNamespace(text="", close=lambda: None))
-    vi.dinner_fetch_timer = 0
-    grab = {}; fn._switch_hold = lambda sec, flash=False: grab.setdefault("img", compose(vi))
-    vi.active_station = "1"; fn.rotate_station()
-    if grab.get("img"): save(grab["img"], "no_dinner.png")
     # weather switch screen (outside dinner window)
     vi.today = "Tue"; vi._currenttime = "20:00"
     vi.dinner_meal = ""; vi.dinner_day = ""; vi.settings["dinner_url"] = ""; vi.sheet_msg = ""
@@ -540,7 +530,7 @@ def main():
     test_weather_switch_screen(fn, vi)
     test_weather_warning_screen(fn, vi)
     test_welcome(fn, vi)
-    test_no_dinner_fallback(fn, vi)
+    test_empty_meal_shows_weather(fn, vi)
     test_fetch_budget(fn, vi)
     test_sheet_message(fn, vi)
     if "--render" in sys.argv:
