@@ -360,9 +360,11 @@ def test_empty_meal_shows_weather(fn, vi):
             fn.requests = types.SimpleNamespace(
                 get=lambda *a, **k: types.SimpleNamespace(text=(csv or ""), close=lambda: None))
         vi.dinner_fetch_timer = 0
+        fn._switch_hold = lambda sec, flash=False: None
+        vi.active_station = "1"; fn.rotate_station()      # fetches the sheet during the hold
         grab = {}
         fn._switch_hold = lambda sec, flash=False: grab.setdefault("img", compose(vi))
-        vi.active_station = "1"; fn.rotate_station()
+        vi.active_station = "1"; fn.rotate_station()      # shows what that fetch brought in
         return grab.get("img")
 
     img = run("Wed", "16:30", "")                       # feature not configured
@@ -407,6 +409,16 @@ def test_fetch_budget(fn, vi):
     check("budget: the skipped fetch happens on the next switch",
           len(calls) == 2 and calls[1] != first)
 
+    # the screen is drawn from the cache before any fetch, and the fetch runs inside the hold
+    vi.dinner_fetch_timer = 0; calls.clear(); seen = {}
+    _refresh = fn.refresh
+    fn.refresh = lambda *a, **k: seen.setdefault("refresh_calls", len(calls))
+    fn._switch_hold = lambda sec, flash=False: seen.setdefault("hold_calls", len(calls))
+    vi.active_station = "1"; fn.rotate_station()
+    fn.refresh = _refresh; fn._switch_hold = lambda sec, flash=False: None
+    check("budget: switch screen shown before any fetch", seen.get("refresh_calls") == 0)
+    check("budget: the fetch runs before the hold ends", seen.get("hold_calls") == 1)
+
     # a skipped fetch must not lose its cached value or burn its poll timer
     vi.dinner_meal = "Pannkakor"; vi.dinner_fetch_timer = 0
     did = fn.get_sheet(allow_fetch=False)
@@ -414,6 +426,39 @@ def test_fetch_budget(fn, vi):
     check("budget: skipped sheet keeps its cached meal", vi.dinner_meal == "Pannkakor")
     check("budget: skipped sheet did not burn its poll timer", vi.dinner_fetch_timer == 0)
     vi.settings["dinner_url"] = ""; vi.dinner_meal = ""; vi.dinner_day = ""
+
+def test_http_release(fn, vi):
+    # A body read that fails must close the socket; one left in use blocks every later
+    # request to that host.
+    log = []
+    class Resp:
+        def __init__(self, fail): self.fail = fail; self.socket = "sock"
+        @property
+        def text(self):
+            if self.fail: raise OSError("timed out")
+            return "body"
+        def close(self): log.append(("close", self.socket))
+    def session(fail, get_fails=False):
+        def get(*a, **k):
+            if get_fails: raise RuntimeError("An existing socket is already connected")
+            return Resp(fail)
+        return types.SimpleNamespace(get=get, _connection_manager=types.SimpleNamespace(
+            _managed_socket_by_key={"a": "sock", "b": "idle", "c": "stuck"}, _available_sockets={"idle"},
+            close_socket=lambda so: log.append(("close_socket", so))))
+    _req = fn.requests
+    fn.requests = session(False)
+    check("http: body returned and socket freed", fn._http_text("u") == "body" and log == [("close", "sock")])
+    log.clear(); fn.requests = session(True)
+    try: fn._http_text("u"); raised = False
+    except OSError: raised = True
+    check("http: failed read raises", raised)
+    check("http: failed read closes the socket", ("close_socket", "sock") in log)
+    log.clear(); fn.requests = session(False, get_fails=True)
+    try: fn._http_text("u")
+    except RuntimeError: pass
+    check("http: failed request closes sockets left in use, keeps idle ones",
+          ("close_socket", "stuck") in log and ("close_socket", "idle") not in log)
+    fn.requests = _req
 
 def test_sheet_message(fn, vi):
     # One CSV, two rows: row1 meal -> dinner_meal, row2 message -> sheet_msg (positional)
@@ -537,6 +582,7 @@ def main():
     test_welcome(fn, vi)
     test_empty_meal_shows_weather(fn, vi)
     test_fetch_budget(fn, vi)
+    test_http_release(fn, vi)
     test_sheet_message(fn, vi)
     if "--render" in sys.argv:
         render_all(fn, vi)

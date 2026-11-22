@@ -119,6 +119,29 @@ def _wx_severity(c):
     if c in (1, 2): return 1
     return 0
 
+def _http_text(url):
+    # GET url and return the body, giving up on a stall after 5 s. A response read to the
+    # end frees its socket for reuse. On any failure every socket the pool still marks as in
+    # use is closed: the library can leave one behind when it fails mid-response (a timeout
+    # while reading headers, or a redirect), and a socket left in use makes every later
+    # request to that host fail with "An existing socket is already connected". Only these
+    # fetches use the pool (departures go over a raw socket), so nothing in use is lost.
+    resp = None
+    try:
+        resp = requests.get(url, timeout=5)
+        txt = resp.text
+        resp.close()
+        return txt
+    except Exception:
+        try:
+            cm = requests._connection_manager
+            for so in list(cm._managed_socket_by_key.values()):
+                if so not in cm._available_sockets: cm.close_socket(so)
+            if resp: resp.socket = None
+        except Exception:
+            pass
+        raise
+
 def _wx_warning(code, temp, gust, hi=None, lo=None, wind=None):
     # Short extreme-weather label (or "") from the upcoming code, mean wind and gust (m/s) and temps.
     # hi/lo are the day's upcoming high/low so HETT/KYLA fire on the forecast peak, not just now.
@@ -156,7 +179,7 @@ def get_weather(allow_fetch=True):
                "&current=temperature_2m,weather_code,wind_speed_10m,wind_gusts_10m"
                "&hourly=weather_code,temperature_2m&daily=temperature_2m_max"
                "&forecast_days=1&wind_speed_unit=ms&timezone=auto")   # m/s (default is km/h!); today only
-        resp = requests.get(url, timeout=5); d = json.loads(resp.text); resp.close()   # give up on a stall
+        d = json.loads(_http_text(url))
         cur = d["current"]
         # open-meteo's local wall clock ("YYYY-MM-DDTHH:MM", timezone=auto, DST-correct).
         # The device clock (_currenttime) is HH:MM only, so local_now() derives the local date and time from this anchor.
@@ -340,7 +363,7 @@ def get_price(allow_fetch=True):
     zone = str(varinit.settings.get("el_zone", "SE3"))
     url = "https://www.elprisetjustnu.se/api/v1/prices/" + want[:4] + "/" + want[5:] + "_" + zone + ".json"
     try:
-        resp = requests.get(url, timeout=5); txt = resp.text; resp.close()
+        txt = _http_text(url)
         pts = _parse_el(txt)
         if len(pts) >= 20:
             keep = {k: v for k, v in days.items() if k >= day}   # drop past days
@@ -617,6 +640,17 @@ _SL = [
     "rrrrrrrrrrrr",
 ]
 
+def _background_fetch():
+    # At most one blocking network refresh per switch, in this order: sheet (meal + message,
+    # every ~15 min), weather (every 30 min, also the local clock the price needs), price
+    # (daily). The others keep their cached values and poll timers and get the next switch.
+    # Returns True if one ran.
+    if get_sheet(): return True
+    _wt = getattr(varinit, "wx_timer", 0)
+    get_weather()
+    if getattr(varinit, "wx_timer", 0) != _wt: return True
+    return get_price()
+
 def rotate_station():
     # Switch to the next station and show the upcoming-station switch screen:
     # row 1 = SL badge + the station about to show; row 2 = the meal during the dinner
@@ -631,32 +665,28 @@ def rotate_station():
             varinit.palette[11] = _bri((200, 30, 30))     # SL red badge
             _blit_icon(top, _SL, 0, 2, {"r": 11, "w": 2})   # 12x12 square badge, vertically centred
             cls(bottom)
-            # Keep two blocking fetches off one switch: every switch already pays for a
-            # departures fetch, so if the sheet fetched here, weather waits for the next switch
-            # (it keeps its cached value and its poll timer, so it's only ~15s later).
-            _fetched = get_sheet()           # refresh meal + custom message (cached ~15 min)
+            # Row 2 is drawn from cached data only, so the screen appears at once; the
+            # network refreshes run during the hold below and show from the next switch.
             shown = False; warn = False
-            # only show a meal we fetched TODAY (never a stale one from a previous day);
+            # only show a meal fetched TODAY (never a stale one from a previous day);
             # no meal planned -> weather + price, same as outside the dinner window
             if dinner_time_ok() and varinit.dinner_day == varinit.today and varinit.dinner_meal:
                 _render_meal(varinit.dinner_meal); shown = True
-            _wt = getattr(varinit, "wx_timer", 0)
             if not shown:
-                _, warn = _render_weather(allow_fetch=not _fetched)
-            elif not getattr(varinit, "wx_local", ""):
-                get_weather(allow_fetch=not _fetched)   # meal showing, but the price needs the local clock
-            _fetched = _fetched or getattr(varinit, "wx_timer", 0) != _wt   # weather fetched this switch?
-            # electricity price at the right end of row 2 (daily fetch, only if nothing else fetched)
+                _, warn = _render_weather(allow_fetch=False)
+            # electricity price at the right end of row 2
             _p35 = (varinit.palette[_EL_GREEN], varinit.palette[_EL_AMBER])
-            get_price(allow_fetch=not _fetched)
             _render_price()
             refresh()
-            # Spend the hold on the incoming station's fetch, then hold out whatever time
-            # is left, less the time the departures take to draw (the switch screen stays up
-            # while they draw, see below): the screen stays up just as long overall.
+            # Spend the hold on the incoming station's fetch and this switch's background
+            # refresh, then hold out whatever time is left, less the time the departures take
+            # to draw (the switch screen stays up while they draw, see below): the screen
+            # stays up just as long overall. A slow departures fetch has already used the
+            # hold, so the background refresh waits for the next switch.
             _hold = int(varinit.settings.get("dinner_hold", 3))
             _t0 = time.monotonic()
             prefetch_departures(nxt)
+            if time.monotonic() - _t0 < 1.5: _background_fetch()
             _draw = min(1.5, getattr(varinit, "dep_render_s", 0))
             _switch_hold(max(0, _hold - _draw - (time.monotonic() - _t0)), flash=warn)
             # clear row 2 as well before handing slots 3/5 back: the main loop redraws once
@@ -743,9 +773,7 @@ def get_sheet(allow_fetch=True):
     if not allow_fetch: return False   # a fetch already ran this switch; retry on the next one
     varinit.dinner_fetch_timer = time.monotonic()   # mark the attempt up front
     try:
-        resp = requests.get(url, timeout=5)   # give up on a stall rather than hang the loop
-        txt = resp.text
-        resp.close()
+        txt = _http_text(url)
         lines = (txt or "").replace("\r", "").split("\n")
         def _cell(i):
             if i >= len(lines): return ""
