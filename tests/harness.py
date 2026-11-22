@@ -200,22 +200,23 @@ def test_dinner_screen(fn, vi):
         check("dinner: station name on top line (non-empty)", _nonblack(img, 0, 15) > 20)
         check("dinner: meal on row 2 in cyan (palette 8)", _has_color(img, (80, 210, 255), 16, 32))
 
-def _wx_json(ctemp, ccode, gust, day_high, temps24, codes24, hour=0):
+def _wx_json(ctemp, ccode, gust, day_high, temps24, codes24, hour=0, wind=4.0):
     import json
     htimes = ["2026-07-16T%02d:00" % i for i in range(len(temps24))]
     return types.SimpleNamespace(
         text=json.dumps({
             "current": {"time": "2026-07-16T%02d:00" % hour,
-                        "temperature_2m": ctemp, "weather_code": ccode, "wind_gusts_10m": gust},
+                        "temperature_2m": ctemp, "weather_code": ccode,
+                        "wind_speed_10m": wind, "wind_gusts_10m": gust},
             "hourly": {"time": htimes, "weather_code": codes24, "temperature_2m": temps24},
             "daily": {"temperature_2m_max": [day_high]}}),
         close=lambda: None)
 
 def test_weather_parse(fn, vi):
     vi.settings["weather"] = 1
-    def run(hour, ctemp, ccode, gust, day_high, temps24, codes24):
+    def run(hour, ctemp, ccode, gust, day_high, temps24, codes24, wind=4.0):
         vi._currenttime = "%02d:00" % hour
-        fn.requests = types.SimpleNamespace(get=lambda *a, **k: _wx_json(ctemp, ccode, gust, day_high, temps24, codes24, hour))
+        fn.requests = types.SimpleNamespace(get=lambda *a, **k: _wx_json(ctemp, ccode, gust, day_high, temps24, codes24, hour, wind))
         vi.wx_code = None; vi.wx_timer = 0
         code, temp, warn = fn.get_weather()
         return code, temp, warn, vi.wx_peak
@@ -234,10 +235,14 @@ def test_weather_parse(fn, vi):
     check("weather parse: after the peak has passed -> no peak shown", peak_pm is None)
 
     # warnings (independent of the hourly indexing)
-    _, _, warn_s, _ = run(12, 9.0, 3, 22.0, 12, [9] * 24, [3] * 24)
-    check("weather parse: gust >= 21 -> STORM", warn_s == "STORM")
-    _, _, warn_b, _ = run(12, 11.0, 3, 16.0, 12, [11] * 24, [3] * 24)
-    check("weather parse: gust 14-21 -> BLÅST", warn_b == "BL\xc5ST")
+    for wind, gust, exp, label in [
+            (9.0, 16.0, "", "breezy day (mean 9, gust 16) -> no warning"),
+            (13.0, 18.0, "BL\xc5ST", "mean wind >= 12 -> BL\xc5ST"),
+            (9.0, 22.0, "BL\xc5ST", "gust >= 21 -> BL\xc5ST"),
+            (21.0, 26.0, "STORM", "mean wind >= 20 -> STORM"),
+            (15.0, 29.0, "STORM", "gust >= 28 -> STORM")]:
+        _, _, w, _ = run(12, 9.0, 3, gust, 12, [9] * 24, [3] * 24, wind=wind)
+        check("weather parse: " + label, w == exp)
     for t, exp in [(28, "VARMT AF"), (27, ""), (-10, "KYLA"), (-9, "")]:
         _, _, w, _ = run(12, float(t), 3, 4.0, t, [t] * 24, [3] * 24)
         check("weather threshold: %d°C -> %r" % (t, exp), w == exp)

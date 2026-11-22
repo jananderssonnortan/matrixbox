@@ -119,16 +119,20 @@ def _wx_severity(c):
     if c in (1, 2): return 1
     return 0
 
-def _wx_warning(code, temp, gust, hi=None, lo=None):
-    # Short extreme-weather label (or "") from the upcoming code, wind gust (m/s) and temps.
+def _wx_warning(code, temp, gust, hi=None, lo=None, wind=None):
+    # Short extreme-weather label (or "") from the upcoming code, mean wind and gust (m/s) and temps.
     # hi/lo are the day's upcoming high/low so HETT/KYLA fire on the forecast peak, not just now.
+    # Wind warnings key on the mean wind; model gusts run high (an ordinary breezy day shows
+    # 15-17 m/s gusts), so gusts only count well above that.
     if hi is None: hi = temp
     if lo is None: lo = temp
+    w = wind if wind is not None else 0
+    g = gust if gust is not None else 0
     if code in (95, 96, 99): return "ÅSKA"              # thunderstorm
-    if gust is not None and gust >= 21: return "STORM"  # gale/storm gusts
+    if w >= 20 or g >= 28: return "STORM"               # storm-force wind
     if code in (75, 86): return "SNÖFALL"               # heavy snow
     if code in (65, 67, 82): return "SKYFALL"           # heavy rain / cloudburst
-    if gust is not None and gust >= 14: return "BLÅST"  # strong wind
+    if w >= 12 or g >= 21: return "BLÅST"               # strong wind
     if hi >= 28: return "VARMT AF"                      # peak of the day, even if cooler now
     if lo <= -10: return "KYLA"
     return ""
@@ -149,7 +153,7 @@ def get_weather(allow_fetch=True):
     try:
         url = ("https://api.open-meteo.com/v1/forecast?latitude=" + str(lat) +
                "&longitude=" + str(lon) +
-               "&current=temperature_2m,weather_code,wind_gusts_10m"
+               "&current=temperature_2m,weather_code,wind_speed_10m,wind_gusts_10m"
                "&hourly=weather_code,temperature_2m&daily=temperature_2m_max"
                "&forecast_days=1&wind_speed_unit=ms&timezone=auto")   # m/s (default is km/h!); today only
         resp = requests.get(url, timeout=5); d = json.loads(resp.text); resp.close()   # give up on a stall
@@ -163,6 +167,8 @@ def get_weather(allow_fetch=True):
         temp = int(round(cur["temperature_2m"]))
         try: gust = float(cur.get("wind_gusts_10m"))
         except: gust = None
+        try: wind = float(cur.get("wind_speed_10m"))
+        except: wind = None
         # Index the hourly arrays by the API's OWN local timestamps, not the device clock.
         # (hourly/current times are in the location's timezone; the device's _currenttime is
         # UTC from the HTTP date header, so using it mis-slices by the tz offset -> false HETT.)
@@ -190,7 +196,7 @@ def get_weather(allow_fetch=True):
                 hi = max(temp, int(round(max(remaining))))
                 lo = min(temp, int(round(min(remaining))))
         except: varinit.wx_peak = None
-        varinit.wx_warn = _wx_warning(varinit.wx_code, temp, gust, hi=hi, lo=lo)
+        varinit.wx_warn = _wx_warning(varinit.wx_code, temp, gust, hi=hi, lo=lo, wind=wind)
     except Exception:
         pass
     return (varinit.wx_code, varinit.wx_temp, varinit.wx_warn)
