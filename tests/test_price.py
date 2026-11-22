@@ -131,8 +131,11 @@ img = shot("05:00  bars + 1,72  green", "2026-11-19T05:00")
 check("05:00 green shown", has(img, G))
 check("bars: now mark under the first bar", mark(img))
 check("palette 3/5 restored after switch", vi.palette[3] == (1, 2, 3) and vi.palette[5] == (4, 5, 6))
-check("row 2 cleared before the palette is handed back",
-      not any(fn.bottom[x, y] for x in range(128) for y in range(fn.bottom.height)))
+check("row 2 holds no price pixels once the palette is handed back",
+      not any(fn.bottom[x, y] in (fn._EL_GREEN, fn._EL_AMBER, fn._EL_RED)
+              for x in range(fn.bottom.width) for y in range(fn.bottom.height)))
+check("departures drawn before the switch screen is left (row 2 not blank)",
+      any(fn.bottom[x, y] for x in range(fn.bottom.width) for y in range(fn.bottom.height)))
 check("20:00 amber shown", has(shot("20:00  bars + 1,92  amber", "2026-11-19T20:00"), A))
 img = shot("22:00  bars past midnight", "2026-11-19T22:00")
 check("22:00 bars run into tomorrow (green night)", has(img, G))

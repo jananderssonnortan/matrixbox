@@ -652,12 +652,13 @@ def rotate_station():
             _render_price()
             refresh()
             # Spend the hold on the incoming station's fetch, then hold out whatever time
-            # is left: the screen stays up just as long, and the departures are already in
-            # memory when the panel clears.
+            # is left, less the time the departures take to draw (the switch screen stays up
+            # while they draw, see below): the screen stays up just as long overall.
             _hold = int(varinit.settings.get("dinner_hold", 3))
             _t0 = time.monotonic()
             prefetch_departures(nxt)
-            _switch_hold(max(0, _hold - (time.monotonic() - _t0)), flash=warn)
+            _draw = min(1.5, getattr(varinit, "dep_render_s", 0))
+            _switch_hold(max(0, _hold - _draw - (time.monotonic() - _t0)), flash=warn)
             # clear row 2 as well before handing slots 3/5 back: the main loop redraws once
             # before the departures replace it, and the price would flash in the wrong colours
             cls(top); cls(bottom)
@@ -679,6 +680,13 @@ def rotate_station():
     varinit.currentfont = 0
     varinit.active_message = False
     varinit.shared["scroll_timer"] = 0
+    if not int(varinit.settings["listmode"]) and varinit.display.width > 64:
+        # Draw the departures now, with no refresh in between: the panel keeps showing the
+        # switch screen until the main loop's next refresh, which then shows the departures
+        # straight away instead of a black panel for the ~1 s the render takes.
+        _t = time.monotonic()
+        scroll_mode(reveal=False)
+        varinit.dep_render_s = time.monotonic() - _t
     return nxt
 
 def temperature_check():
@@ -1479,7 +1487,9 @@ def renderstring(_string, screen_partition = 0, min = 0, slow = 0, invertcolor =
     if sys_msg: varinit.currentfont = font_before
     return(pixwidth)
 
-def scroll_mode():
+def scroll_mode(reveal=True):
+    # reveal=False draws without refreshing, so the panel keeps its current frame until
+    # the caller's next refresh.
     if varinit.matrix.height == 64: microcontroller.cpu.frequency = 180000000
     if varinit.if_long > 128: version_delay(slowdown=2)
     nightcheck()
@@ -1538,7 +1548,7 @@ def scroll_mode():
             reset_scroll()
             varinit.active_message = False
         elif time.monotonic() > varinit.shared["scroll_timer"] + updatedelay:
-            cls(bottom, _refresh=True)
+            cls(bottom, _refresh=reveal)
             if time.monotonic() > varinit.ad_timer + varinit.ad_delay * 60 and varinit.shared["nightcount"] < 2:
                 try:
                     ad = ad_message()
