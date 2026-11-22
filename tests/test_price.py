@@ -62,9 +62,15 @@ set_clock("2026-11-19T14:05")
 check("from 13:00: tomorrow fetched", fn.get_price() is True and urls[-1].endswith("/2026/11-20_SE3.json"))
 check("both days held: no third fetch", fn.get_price() is False and len(urls) == 2)
 check("now price 14:05 = 2.617", abs(fn.el_now() - 2.617) < 1e-9)
-lo, hi = vi.el_days["2026-11-19"][1:]
-check("levels: green<=1.744 red>=2.617", abs(lo - 1.744) < 1e-9 and abs(hi - 2.617) < 1e-9)
-check("14:05 is red", fn._el_level(fn.el_now(), lo, hi) == fn._EL_RED)
+check("level: within 0.20 of the cheapest coming hour -> green", fn._el_level(1.55, 1.40) == fn._EL_GREEN)
+check("level: 0.20-0.60 above -> amber", fn._el_level(1.60, 1.20) == fn._EL_AMBER)
+check("level: 0.60+ above -> red", fn._el_level(2.62, 1.74) == fn._EL_RED)
+vi.settings["el_red"] = "0,4"
+check("level: el_red setting (comma decimal) moves the red limit", fn._el_level(1.60, 1.20) == fn._EL_RED)
+del vi.settings["el_red"]
+hrs = fn._el_hours(8)
+check("14:05 is red (2.62 vs 1.74 at 21:00)", hrs[0][1] == fn._EL_RED)
+check("cheapest coming hour is green", min(hrs, key=lambda h: h[0])[1] == fn._EL_GREEN)
 set_clock("2026-11-20T00:10")
 check("midnight: tomorrow becomes today without a fetch", fn.el_now() is not None and fn.get_price() is False)
 set_clock("2026-11-20T14:00")
@@ -132,14 +138,25 @@ img = shot("22:00  bars past midnight", "2026-11-19T22:00")
 check("22:00 bars run into tomorrow (green night)", has(img, G))
 img = shot("14:00  Tacos + bars + 2,62  red", "2026-11-19T14:05", meal="Tacos")
 check("14:00 red beside short meal", has(img, Rr) and mark(img))
-img = shot("16:00  mid meal: falls back to El x,xx kr", "2026-11-19T16:00", meal="Kottbullar mos")
-check("mid meal: no bars, plain price", not mark(img) and has(img, A))
+img = shot("16:00  mid meal: falls back to El 2,53 kr  red", "2026-11-19T16:00", meal="Kottbullar mos")
+check("mid meal: no bars, plain price", not mark(img) and has(img, Rr))
 check("storm warning: price hidden", not has(shot("20:00  storm: price hidden", "2026-11-19T20:00", wx=(95, "18", "STORM"), peak=22), A))
 check("long meal: price hidden", not has(shot("16:00  long meal: price hidden", "2026-11-19T16:00", meal="Kycklinggryta med ris"), Rr))
 vi.settings["el_bars"] = 0
 img = shot("05:00  el_bars=0: El 1,72 kr", "2026-11-19T05:00")
 check("el_bars=0: plain price, no bars", not mark(img) and has(img, G))
 vi.settings["el_bars"] = 1
+
+# flat day 1,20-1,60: no red, and bars scaled from zero stay close in height
+flat = [1.2 + 0.4 * (i % 8) / 7 for i in range(24)]
+vi.el_days = {d: [(h * 60 + q * 15, flat[h]) for h in range(24) for q in range(4)]
+              for d in ("2026-11-19", "2026-11-20")}
+img = shot("15:00  flat day 1,20-1,60: no red, bars close in height", "2026-11-19T15:00")
+check("flat day: no red", not has(img, Rr))
+def bar_h(img, x): return sum(1 for y in range(16, 30) if img[y][x] != (0, 0, 0))
+xs = [x for x in range(40, 128) if img[31][x] == WHITE]
+hs = [bar_h(img, xs[0] + i * 4) for i in range(8)]
+check("flat day: shortest bar at least 3/4 of the tallest", min(hs) * 4 >= max(hs) * 3)
 
 scale = 8; W, H = 128 * scale, 32 * scale
 out = Image.new("RGB", (W, (H + 40) * len(shots)), (40, 40, 40)); d = ImageDraw.Draw(out)

@@ -343,10 +343,8 @@ def get_price(allow_fetch=True):
         resp = requests.get(url, timeout=5); txt = resp.text; resp.close()
         pts = _parse_el(txt)
         if len(pts) >= 20:
-            ps = sorted(p for _, p in pts); n = len(ps)
             keep = {k: v for k, v in days.items() if k >= day}   # drop past days
-            # (points, green limit = cheapest third of that day, red limit = priciest quarter)
-            keep[want] = (pts, ps[n // 3], ps[(n * 3) // 4])
+            keep[want] = pts
             varinit.el_days = keep
             varinit.el_timer = 0                      # back-off is only for failures
     except Exception as e:
@@ -365,30 +363,36 @@ def el_now():
     now = local_now()
     if not now: return None
     e = getattr(varinit, "el_days", {}).get(now[0])
-    return _el_at(e[0], now[1]) if e else None
+    return _el_at(e, now[1]) if e else None
 
-def _el_level(p, lo, hi):
-    if p >= hi and p >= 1.0: return _EL_RED   # floor: a cheap day never goes red
-    if p <= lo: return _EL_GREEN
+def _el_limit(key, default):
+    try: return float(str(varinit.settings.get(key, default)).replace(",", "."))
+    except: return default
+
+def _el_level(p, ref):
+    # Colour by what waiting would save: p's distance (SEK/kWh, spot excl. VAT) above ref, the
+    # cheapest hour coming up. Green = about as cheap as it gets, red = worth waiting. A flat
+    # day stays green/amber however its prices spread.
+    d = p - ref
+    if d >= _el_limit("el_red", 0.6): return _EL_RED
+    if d < _el_limit("el_green", 0.2): return _EL_GREEN
     return _EL_AMBER
 
 def _el_hours(n):
     # [(price, colour) or None] x n: the current quarter-hour, then the means of the next n-1
-    # whole hours, each coloured against its own day's limits. None where prices are unknown.
+    # whole hours, all coloured against the cheapest of them. None where prices are unknown.
     day, mins = local_now()
     days = varinit.el_days
-    e = days[day]; p = _el_at(e[0], mins)
-    out = [(p, _el_level(p, e[1], e[2]))]
+    vals = [_el_at(days[day], mins)]
     tomorrow = _el_next_day(day)
     for k in range(1, n):
         h = mins // 60 + k
         e = days.get(day if h < 24 else tomorrow)
         h %= 24
-        q = [v for m, v in e[0] if h * 60 <= m < h * 60 + 60] if e else []
-        if not q: out.append(None); continue
-        v = sum(q) / len(q)
-        out.append((v, _el_level(v, e[1], e[2])))
-    return out
+        q = [v for m, v in e if h * 60 <= m < h * 60 + 60] if e else []
+        vals.append(sum(q) / len(q) if q else None)
+    ref = min(v for v in vals if v is not None)
+    return [(v, _el_level(v, ref)) if v is not None else None for v in vals]
 
 def _small_width(txt):
     # (width, baseline_y) of txt in the small font, measured off-screen in `bottom`.
@@ -455,13 +459,13 @@ def _render_price():
         return False
 
 def _el_draw_bars(x, hrs):
-    # heights 3..12 px scaled between the lowest and highest price shown; baseline row 13,
-    # the "now" mark (white, slot 2 on the switch screen) on row 15
-    vals = [h[0] for h in hrs if h]
-    lo, hi = min(vals), max(vals)
+    # heights 1..12 px in proportion to the price from zero, so small differences look small;
+    # the top is the highest price shown but at least 1 kr, so a cheap day stays low.
+    # Baseline row 13, the "now" mark (white, slot 2 on the switch screen) on row 15.
+    top = max([h[0] for h in hrs if h] + [1.0])
     for i, h in enumerate(hrs):
         if not h: continue
-        hgt = 3 + int(round((h[0] - lo) / ((hi - lo) or 1) * 9))
+        hgt = max(1, int(round(max(h[0], 0) / top * 12)))
         bx = x + i * (_EL_BAR_W + 1)
         for dx in range(_EL_BAR_W):
             for y in range(14 - hgt, 14):
