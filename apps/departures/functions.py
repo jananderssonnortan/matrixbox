@@ -1162,6 +1162,7 @@ def fetch_data(host, port=80, args="", headers = "", filetype="text"):
         date = x.split("Date:",1)[1]
         date = date.split("\r\n")[0]
         varinit.currenttime = convert_date(date)
+        varinit.clock_mono = time.monotonic()
     except: pass
     print("--------------------------------------------------------- ")
     if varinit.if_long > 128 and not int(varinit.settings["listmode"]): version_delay(slowdown=2)
@@ -1255,13 +1256,30 @@ def traffic_parser(data, traffic_type, num="1"):
                             dataout.append(dep)
     return dataout
 
+def _advance_clock():
+    # Minutes to departure are expected - currenttime, and currenttime comes from the Date
+    # header of the latest t-skylt response. Drawing from cached data carries it forward by
+    # the time since that response, so the minutes keep counting down between fetches.
+    try:
+        now = time.monotonic()
+        varinit.currenttime += now - varinit.clock_mono
+        varinit.clock_mono = now
+    except Exception:
+        pass        # no Date header seen yet
+
 def prefetch_departures(num):
     # Pull the incoming station's departures JSON early and park it in the same cache
     # get_departure() reads from. Called from the switch screen so the network round
-    # trip happens while the hold is on screen.
+    # trip happens while the hold is on screen. Departures fetched less than
+    # departure_max_age seconds ago are reused as they are, without a fetch.
     try:
         stn = varinit.settings["stations"][num]
     except: return False
+    _at = varinit.departure_fetched_at.get(num)
+    if num in varinit.cached_departure_data and _at is not None \
+            and time.monotonic() - _at < varinit.departure_max_age:
+        varinit.use_cached_data = True
+        return False
     # Nothing useful to fetch for an unconfigured slot; get_departure() shows its own
     # prompt for these and we must not set the cache flag on its behalf.
     try:
@@ -1275,6 +1293,7 @@ def prefetch_departures(num):
                                 "&station=" + str(stn["siteid"]))
         if not _data: return False
         varinit.cached_departure_data[num] = json.loads(_data)
+        varinit.departure_fetched_at[num] = time.monotonic()
         varinit.use_cached_data = True
         print("■ Prefetched station", num)
         return True
@@ -1299,6 +1318,7 @@ def get_departure(num = "1", dataout = [["1", "^ Data error","","",""]]):
     if varinit.use_cached_data and num in varinit.cached_departure_data:
         data = varinit.cached_departure_data[num]
         varinit.use_cached_data = False
+        _advance_clock()
         print("■ Using cached data for station", num)
     else:
       try: 
@@ -1329,6 +1349,7 @@ def get_departure(num = "1", dataout = [["1", "^ Data error","","",""]]):
         print("Avkodningsfel.")
         return [["1", "^ Unknown error: 1","","",""]]
       varinit.cached_departure_data[num] = data
+      varinit.departure_fetched_at[num] = time.monotonic()
     try:
         dataout = []
         print("■", varinit.settings["stations"][num]["mystation"], varinit.settings["stations"][num]["siteid"])

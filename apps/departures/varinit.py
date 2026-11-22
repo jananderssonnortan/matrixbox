@@ -147,6 +147,10 @@ shared = {"loop_counter":-5,
 
 cached_departure_data = {}
 use_cached_data = False
+departure_fetched_at = {}   # station -> time.monotonic() of its last t-skylt fetch
+departure_max_age = 75      # seconds a station's departures are reused instead of refetched; with two
+                            # stations 30 s apart a station is fetched every third visit, 15 s clear of the limit
+clock_mono = 0              # time.monotonic() when currenttime was last set from a Date header
 
 traffic_dict = {"METRO":settings["METRO"],
                 "BUS":settings["BUS"],

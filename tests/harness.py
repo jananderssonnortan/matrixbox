@@ -460,6 +460,36 @@ def test_http_release(fn, vi):
           ("close_socket", "stuck") in log and ("close_socket", "idle") not in log)
     fn.requests = _req
 
+def test_departure_reuse(fn, vi):
+    # A station's departures are reused for departure_max_age seconds instead of refetched,
+    # and the clock behind the minutes is carried forward while they are.
+    _setup_stations(vi)
+    calls = []
+    _fd = fn.fetch_data
+    def fake_fetch(*a, **k):
+        calls.append(k.get("args", "")); return '{"departures": []}'
+    fn.fetch_data = fake_fetch
+    vi.cached_departure_data.clear(); vi.departure_fetched_at.clear(); vi.use_cached_data = False
+    check("reuse: first visit fetches", fn.prefetch_departures("2") is True and len(calls) == 1)
+    vi.use_cached_data = False
+    check("reuse: within departure_max_age no fetch, cache flagged for the draw",
+          fn.prefetch_departures("2") is False and len(calls) == 1 and vi.use_cached_data)
+    vi.departure_fetched_at["2"] -= 60
+    vi.use_cached_data = False
+    check("reuse: 60 s old (second return visit) still reused", fn.prefetch_departures("2") is False and len(calls) == 1)
+    vi.departure_fetched_at["2"] -= 30
+    check("reuse: 90 s old (third return visit) fetches again", fn.prefetch_departures("2") is True and len(calls) == 2)
+    check("reuse: other stations keep their own age", fn.prefetch_departures("1") is True and len(calls) == 3)
+    fn.fetch_data = _fd
+    vi.currenttime = 1000000; vi.clock_mono = fn.time.monotonic() - 30
+    fn._advance_clock()
+    check("reuse: clock carried forward by the time since the last response",
+          29.5 < vi.currenttime - 1000000 < 31)
+    vi.currenttime = ""; vi.clock_mono = 0
+    fn._advance_clock()
+    check("reuse: no Date header yet leaves the clock alone", vi.currenttime == "")
+    vi.cached_departure_data.clear(); vi.departure_fetched_at.clear(); vi.use_cached_data = False
+
 def test_sheet_message(fn, vi):
     # One CSV, two rows: row1 meal -> dinner_meal, row2 message -> sheet_msg (positional)
     vi.settings["dinner_url"] = "http://x/menu.csv"
@@ -583,6 +613,7 @@ def main():
     test_empty_meal_shows_weather(fn, vi)
     test_fetch_budget(fn, vi)
     test_http_release(fn, vi)
+    test_departure_reuse(fn, vi)
     test_sheet_message(fn, vi)
     if "--render" in sys.argv:
         render_all(fn, vi)
